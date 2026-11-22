@@ -1,0 +1,236 @@
+[
+  {
+    "file": "ok-simple.zip",
+    "expect": "accept",
+    "maxUnpacked": 1048576,
+    "why": "one file under PSP/SAVEDATA/"
+  },
+  {
+    "file": "ok-deflate.zip",
+    "expect": "accept",
+    "maxUnpacked": 1048576,
+    "why": "deflated entry"
+  },
+  {
+    "file": "ok-zip-r-directories.zip",
+    "expect": "accept",
+    "maxUnpacked": 1048576,
+    "why": "what `zip -r` writes: directory entries (trailing slash, size 0) before the files"
+  },
+  {
+    "file": "ok-outside-ignored.zip",
+    "expect": "accept",
+    "maxUnpacked": 1048576,
+    "why": "a name outside PSP/SAVEDATA/ is ignored by the loader, not refused"
+  },
+  {
+    "file": "ok-empty-file.zip",
+    "expect": "accept",
+    "maxUnpacked": 1048576,
+    "why": "zero-byte file"
+  },
+  {
+    "file": "ok-only-directories.zip",
+    "expect": "accept",
+    "maxUnpacked": 1048576,
+    "why": "directories only (nothing to load; not an error)"
+  },
+  {
+    "file": "ok-dots-in-names.zip",
+    "expect": "accept",
+    "maxUnpacked": 1048576,
+    "why": "\"...\" and \"a..b\" are ordinary names, only the exact segment \"..\" is refused"
+  },
+  {
+    "file": "bad-dotdot-leading.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "zip-slip: ../x"
+  },
+  {
+    "file": "bad-dotdot-middle.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "zip-slip: PSP/SAVEDATA/../../evil"
+  },
+  {
+    "file": "bad-dotdot-directory.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "zip-slip as a directory entry: ../"
+  },
+  {
+    "file": "bad-absolute.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "absolute path"
+  },
+  {
+    "file": "bad-backslash.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "backslash separator"
+  },
+  {
+    "file": "bad-drive-letter.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "Windows drive"
+  },
+  {
+    "file": "bad-control-char.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "control character (0x01) in the name"
+  },
+  {
+    "file": "bad-control-newline.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "newline in the name"
+  },
+  {
+    "file": "bad-control-del.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "DEL (0x7f) in the name"
+  },
+  {
+    "file": "bad-nul.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "NUL in the name"
+  },
+  {
+    "file": "bad-empty-name.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "empty name"
+  },
+  {
+    "file": "bad-duplicate.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "the same file name twice"
+  },
+  {
+    "file": "bad-duplicate-dir-file.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "\"a/\" and \"a\": same path as directory and file"
+  },
+  {
+    "file": "bad-symlink.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "symlink (unix mode 0120777, host 3)"
+  },
+  {
+    "file": "bad-encrypted.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "encrypted entry (flag bit 0)"
+  },
+  {
+    "file": "bad-zip64-eocd.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "ZIP64 marker in the end-of-central-directory record"
+  },
+  {
+    "file": "bad-zip64-entry.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "ZIP64 marker (0xffffffff) in an entry size"
+  },
+  {
+    "file": "bad-name-mismatch.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "local header name differs from the central directory name"
+  },
+  {
+    "file": "bad-size-lie-smaller.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "declared unpacked size smaller than the real one"
+  },
+  {
+    "file": "bad-size-lie-bigger.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "declared unpacked size bigger than the real one"
+  },
+  {
+    "file": "bad-too-big-total.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "unpacked total over the limit (2 MiB of zeros in a few bytes; limit of the corpus: 1 MiB)"
+  },
+  {
+    "file": "bad-too-big-sum.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "each entry under the limit, the sum over it"
+  },
+  {
+    "file": "bad-unsupported-method.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "compression method 99"
+  },
+  {
+    "file": "bad-truncated.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "end of the archive cut off"
+  },
+  {
+    "file": "bad-not-a-zip.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "not a zip at all"
+  },
+  {
+    "file": "bad-dot-segment.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "\".\" segment: PSP/SAVEDATA/X/./D.BIN"
+  },
+  {
+    "file": "bad-empty-segment.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "empty segment (double slash): a//b"
+  },
+  {
+    "file": "bad-empty-zip.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "a zip with 0 entries"
+  },
+  {
+    "file": "bad-file-and-parent.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "\"X\" as a file and \"X/Y\" below it (file / directory conflict)"
+  },
+  {
+    "file": "bad-long-name.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "entry name of 513 bytes (limit 512)"
+  },
+  {
+    "file": "bad-too-many-entries.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "4097 entries (limit 4096)"
+  },
+  {
+    "file": "bad-entry-too-big.zip",
+    "expect": "reject",
+    "maxUnpacked": 1048576,
+    "why": "one entry declaring 256 MiB + 1 (per-entry limit 256 MiB); a stored entry whose header lies about its size, so the file stays tiny"
+  }
+]

@@ -1,0 +1,122 @@
+# totv-streaming as a SYSTEM service under its own unprivileged uid (GPL-3.0-or-later). Example, NOT installed by anything in this repository.
+# Install (root):  scripts/setup-uid.sh   then   install -m0644 contrib/totv-streaming.service /etc/systemd/system/ && systemctl daemon-reload
+# Read README.md, section "GPU isolation (opção 2)", for what every directive buys and what none of them fixes (a kernel exploit through the NVIDIA
+# driver is still root). Check it:  systemd-analyze verify contrib/totv-streaming.service ; systemd-analyze security --no-pager totv-streaming.service
+#
+# Layout assumed (change the paths, not the idea):
+#   /opt/totv-streaming/bin/{totv-streaming,retro-emu}   root-owned, not writable by the service uid
+#   /opt/totv-streaming/cores/                              the libretro cores (+ cores/system/PPSSPP), root-owned
+#   /etc/totv-stream/retro-stream.secret                       written by whoever runs the Totv; group totv-stream may read it (see setup-uid.sh)
+#   /run/totv-stream/control.sock                              created by the component (mode 0660, group totv-stream)
+[Unit]
+Description=totv-streaming (libretro emulators for the Totv; N64/PSP render on the GPU)
+Documentation=file:///opt/totv-streaming/README.md
+After=network.target nvidia-persistenced.service
+# the NVIDIA module (and its nodes) must exist: nvidia-persistenced/udev create /dev/nvidiactl at boot; without a GPU the SNES path still works.
+# Wants= alone does not order: After= makes the component start after nvidia-persistenced (if that unit exists on this machine; otherwise both are no-ops)
+Wants=nvidia-persistenced.service
+
+[Service]
+Type=simple
+ExecStart=/opt/totv-streaming/bin/totv-streaming
+Restart=on-failure
+RestartSec=3
+
+# ---- identity ----
+# A static user created by scripts/setup-uid.sh (home /nonexistent, shell nologin). DynamicUser=yes would also work for everything below but the
+# socket group would then have to be set with a numeric id and SupplementaryGroups would not be allowed to name the Totv's group: prefer the static one.
+User=totv-stream
+Group=totv-stream
+# GPU nodes are root:video / root:render on most distributions (here: 0666, which is why DeviceAllow below is the real gate). "render" must exist
+# (Debian/Ubuntu/Arch/Fedora do); drop it on a system without that group.
+SupplementaryGroups=video render
+# the unit's own cgroup caps the component AND every session (MaxSessions defaults to 1); there is no `systemd --user` for this uid, so the per-session
+# scope of cgroup.go is off here and /v1/health "limits" reports the unit's limits instead (pids_limited / memory_limited)
+Environment=TOTV_STREAM_CGROUP=off
+# Memory accounting of MemoryMax (tmpfs pages are charged to the cgroup of the process that wrote them, so ALL of this counts):
+#   ROM download tmpfs (TemporaryFileSystem .../tmp)  2560m   (worst case: a full 2 GiB PSP ISO + slack)
+#   writable memory stick (.../rw)                    512m
+#   private /dev/shm of the PSP (emu/host.c)          512m
+#   emulator RSS (N64 ~340 MB, PSP ~240 MB) + driver-pinned memory + the component (Go) ~ 0.5-1 GB
+#   sum worst case ~4.1-4.6 GB  ->  5G leaves headroom; 4G (the previous value) could OOM a legitimate worst case. Shrinking the download tmpfs shrinks this.
+MemoryMax=5G
+# when the kernel OOM-kills something in the unit (a hostile core), the unit stays up instead of being stopped as a whole: the supervisor/session
+# cleanup already handles the dead child
+OOMPolicy=continue
+MemorySwapMax=0
+TasksMax=512
+CPUQuota=400%
+
+# ---- what the component sees of the machine ----
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+# /proc: only our own processes are visible (the parent reads /proc/<child>/status, /proc/<child>/fd and the cgroup files; those are ours)
+ProtectProc=invisible
+# ProcSubset=pid is NOT set: it hides /proc/sys, /proc/cpuinfo, /proc/meminfo etc. for the whole unit, and what Go, the NVIDIA user-space libraries and
+# PPSSPP read there under the system manager has not been measured here (only the user manager / run-sandboxed.sh path was). To enable it: add the
+# line, start a PSP and an N64 session, and check `journalctl -u totv-streaming` for failed opens plus a non-black picture (README, "GPU isolation").
+#ProcSubset=pid
+PrivateUsers=no
+# SysV IPC objects (shm/sem/msg) the unit created are removed when it stops, so a hostile core cannot leave segments behind
+RemoveIPC=yes
+# ROM downloads (a PSP ISO is up to 2 GiB, in RAM) and the PSP "memory stick" that a hostile ROM can fill (checkRWTmp refuses a disk) each get a tmpfs WITH
+# a size, mounted over empty directories that scripts/setup-uid.sh creates (the mount point must exist; the file system is read-only otherwise).
+# Sizes: README, "Docker" (same numbers as the compose example). PrivateTmp covers /tmp for everything else.
+PrivateTmp=yes
+TemporaryFileSystem=/var/lib/totv-stream/tmp:rw,nosuid,nodev,noexec,size=2560m,nr_inodes=4096,mode=1777
+TemporaryFileSystem=/var/lib/totv-stream/rw:rw,nosuid,nodev,noexec,size=512m,nr_inodes=20000,mode=1777
+Environment=TOTV_STREAM_TMP=/var/lib/totv-stream/tmp TOTV_STREAM_RW_TMP=/var/lib/totv-stream/rw
+# the cores and the binaries are read-only for the service; nothing else is writable except the runtime directory
+ReadOnlyPaths=/opt/totv-streaming /etc/totv-stream
+RuntimeDirectory=totv-stream
+# 0750: only root, the service uid and group totv-stream (the Totv's user must be a member) can even reach the socket; the socket itself is 0660
+RuntimeDirectoryMode=0750
+UMask=0027
+Environment=TOTV_STREAM_SOCK=/run/totv-stream/control.sock
+Environment=TOTV_STREAM_SECRET_FILE=/etc/totv-stream/retro-stream.secret
+Environment=TOTV_STREAM_CORES=/opt/totv-streaming/cores
+Environment=TOTV_STREAM_EMU=/opt/totv-streaming/bin/retro-emu
+
+# ---- devices: only what the context creation needs (measured, README "GPU isolation (opção 2)") ----
+# PrivateDevices=yes would hide the GPU; DevicePolicy=closed + an allow list does what is needed. /dev/null, /dev/zero, /dev/full, /dev/random,
+# /dev/urandom and /dev/tty are always allowed by DevicePolicy=closed.
+# NOT listed on purpose: /dev/nvidia-modeset (NVKMS: display modesetting), /dev/nvidia-uvm*, /dev/nvidia-caps/*, /dev/dri/card* (the whole DRM master
+# surface of the desktop). Opening them fails with EPERM and the EGL(platform device)+GLideN64/PPSSPP path does not care (measured with a preload that
+# made open() fail, and by closing them: 60 s of every real core).
+DevicePolicy=closed
+DeviceAllow=/dev/nvidiactl rw
+DeviceAllow=/dev/nvidia0 rw
+DeviceAllow=/dev/dri/renderD128 rw
+# a machine with two GPUs: also /dev/nvidia1 rw and the matching renderD129 (the context uses the first EGL device)
+
+# ---- kernel interfaces ----
+# The emulator child builds its own user+net+ipc+pid(+mount for PSP) namespaces (emu/host.c): they must stay allowed, all others are not.
+RestrictNamespaces=user net ipc pid mnt
+# AF_NETLINK: Go's net.Interfaces() (pion/ice enumerates the interfaces) uses a netlink route socket. AF_INET only: the media socket is UDP4
+# (rtc.go: NetworkTypeUDP4). The control socket is AF_UNIX.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# MemoryDenyWriteExecute=yes is NOT set: the N64 (dynarec) and PSP (JIT) cores generate code at run time and the NVIDIA driver maps executable memory.
+# Do not "fix" the security score with it.
+# The syscall allow-list is the services profile plus what the host needs and that profile excludes: mount (PSP private /dev/shm), unshare/setns
+# family (namespaces above), the Landlock + seccomp syscalls that the child uses to sandbox itself (@sandbox), pivot-free file-system calls.
+SystemCallFilter=@system-service @mount @sandbox unshare
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+# media goes to the client's address only: set it to the Totv's network and uncomment (default: no restriction, README "What was NOT proved")
+#IPAddressDeny=any
+#IPAddressAllow=localhost 192.168.0.0/24
+
+[Install]
+WantedBy=multi-user.target

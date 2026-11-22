@@ -1,0 +1,60 @@
+# Example for the totv-streaming component (GPL-3.0-or-later). Build first:  docker build --target runtime -t ghcr.io/victobriel/totv-streaming:local .
+# What was tested and what was not is in README.md, section "Docker". The Totv repository is not touched by anything here.
+#
+# The image has NO libretro core, ROM or BIOS. Build the cores once with scripts/fetch-cores.sh (output: ./cores) and mount them read-only.
+services:
+  totv-streaming:
+    image: ghcr.io/victobriel/totv-streaming:local     # example only: not published yet; build locally (docker build -t ...). Pin by digest for real use
+    network_mode: host                 # no "ports:"; media on TOTV_STREAM_UDP_PORT (8422/udp), bound only to the client's iceHost
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]                    # no cap_add at all
+    security_opt:
+      - no-new-privileges:true
+      # RELAXATION (documented in README): Docker's default seccomp blocks unshare(CLONE_NEWUSER|NEWNET|NEWNS) and mount(), which the
+      # emulator child needs to build its own netns and its private /dev/shm (PSP). This profile = Docker's default + exactly those two
+      # calls with fixed arguments, plus CLONE_NEWIPC in unshare() (see scripts/make-seccomp.sh; regenerate an older copy of this profile, or the child runs without its own IPC namespace). Without it the component still starts, with isolation.netns=false,
+      # and refuses every session that needs the namespaces (PSP) instead of running it unisolated.
+      - seccomp:./docker/seccomp-totv.json
+      # AppArmor hosts (Ubuntu/Debian with AppArmor enabled; NOT TESTED, this PC has none): docker-default also denies mount(); add
+      #   - apparmor=unconfined
+      # or load an own profile that allows "mount fstype=tmpfs" and userns create. SELinux hosts: likewise untested.
+    # REQUIRED, not optional: without a cgroup there is no ceiling on threads or memory for a hostile core (the component warns in the log and in
+    # /v1/health "limits" when pids.max / memory.max are not set). Under systemd: TasksMax= and MemoryMax= in the unit.
+    pids_limit: 256                    # PPSSPP alone runs ~41 threads
+    mem_limit: 4g                      # tmpfs below count here: PSP = ISO copy (<= 2 GiB) + private /dev/shm (<= 1 GiB per session) + core ~250 MB
+    cpus: 4
+    init: true
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: graphics,utility   # "graphics" = EGL/GL libs for headless EGL; "video" (NVENC) is NOT needed: encoding is x264 on the CPU
+      TOTV_STREAM_TMP: /run/totv-tmp                 # ROM downloads (PSP: whole ISO here, in RAM)
+      TOTV_STREAM_RW_TMP: /run/totv-rw               # PSP's writable memory stick/caches: MUST be a tmpfs with size= (a hostile ROM can fill it)
+      # TOTV_STREAM_UDP_PORT: "8422"
+      # TOTV_STREAM_MAX_SESSIONS: "1"
+    tmpfs:
+      - /run/totv-tmp:size=2560m,nr_inodes=4096,uid=1000,gid=1000,mode=0700   # 2.5 GiB only matters if PSP is used (ISO up to 2 GiB); 128m is enough for SNES/N64
+      - /run/totv-rw:size=512m,nr_inodes=20000,uid=1000,gid=1000,mode=0700
+    volumes:
+      - ./cores:/opt/cores:ro                                  # cores (+ cores/system/PPSSPP) from scripts/fetch-cores.sh; empty = no platform available
+      - totv_stream_sock:/run/totv-stream                      # control socket: share this volume with the Totv container
+      - totv_stream_secret:/run/totv-stream-secret:ro          # retro-stream.secret written by the Totv
+    # NVIDIA GPU through the NVIDIA Container Toolkit (needs nvidia-container-toolkit + `nvidia-ctk runtime configure --runtime=docker`).
+    # NOT TESTED here: this PC has the GPU but not the toolkit.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, graphics, utility]
+
+    # ---- Intel / AMD (Mesa) instead of NVIDIA: NOT TESTED AT ALL (no such GPU here). Replace the `deploy:` block above with:
+    #   devices: ["/dev/dri/renderD128:/dev/dri/renderD128"]
+    #   group_add: ["<gid of the render group on the host: getent group render>"]
+    #   environment: TOTV_STREAM_GPU_DEVICES: /dev/dri/renderD128    # extra Landlock rule after the sandbox; whether Mesa needs more is unknown
+    # and build with  --build-arg MESA=1  (adds libEGL/libGL Mesa drivers + mesa-va-drivers). VAAPI is not used by the component today:
+    # video is x264 on the CPU, so "VAAPI" here only means the Mesa GPU stack that a GL core (N64/PSP) would render with.
+volumes:
+  totv_stream_sock:
+  totv_stream_secret:

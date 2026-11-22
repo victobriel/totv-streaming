@@ -1,0 +1,11 @@
+Test homebrew for the PSP prototype: the PSPSDK "gu/cube" sample (BSD license, see the header of cube.c; a copy of the PSPSDK LICENSE is in LICENSE-PSPSDK next to it,
+original at https://github.com/pspdev/pspsdk) with three additions: Cross held = white screen (latency probe), analog stick X moves the cube,
+and a counter in ms0:/PSP/SAVEDATA/TOTV00000/RUNS.BIN that grows on every run (save round trip).
+Build (toolchain: release tarball of https://github.com/pspdev/pspdev, no root needed):
+  export PSPDEV=<unpacked pspdev>; export PATH=$PSPDEV/bin:$PATH
+  cp -r $PSPDEV/psp/sdk/samples/gu/cube $PSPDEV/psp/sdk/samples/gu/common <work>/; cp cube.c <work>/cube/
+  sed -i 's/-lpspgum -lpspgu/-lpspgum -lpspgu -lpspctrl/' <work>/cube/Makefile; make -C <work>/cube     # -> EBOOT.PBP
+The EBOOT.PBP is not committed; PSP_ROM=<path to it> is what the real test takes.
+ISO and CSO test images made from the same EBOOT (no commercial content): PSP_GAME/PARAM.SFO (from the build, `mksfo`) +
+PSP_GAME/SYSDIR/BOOT.BIN and EBOOT.BIN = cube.elf, packed with `xorriso -as mkisofs -iso-level 1 -V TOTVCUBE -o totv-cube.iso <dir>`
+(it ran in an alpine container here; any ISO 9660 writer works), then `python3 mkcso.py totv-cube.iso totv-cube.cso`.

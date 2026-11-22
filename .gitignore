@@ -1,0 +1,4 @@
+bin/
+*.so
+cores/
+/totv-streaming

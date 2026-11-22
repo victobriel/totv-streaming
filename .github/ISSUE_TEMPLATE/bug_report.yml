@@ -1,0 +1,31 @@
+name: Bug report
+description: Something does not work
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Do not attach ROMs, BIOS or firmware. Do not paste secrets or session tokens."
+  - type: input
+    id: gpu
+    attributes: {label: GPU and model, placeholder: "e.g. NVIDIA GeForce ... / none (SNES)"}
+  - type: input
+    id: driver
+    attributes: {label: GPU driver and version}
+  - type: input
+    id: kernel
+    attributes: {label: Kernel (uname -r) and distribution}
+    validations: {required: true}
+  - type: input
+    id: core
+    attributes: {label: "Core and commit (snes9x / mupen64plus-next / ppsspp)"}
+    validations: {required: true}
+  - type: textarea
+    id: health
+    attributes: {label: "Output of GET /v1/health (isolation and limits)", render: json}
+  - type: textarea
+    id: what
+    attributes: {label: What happened and what you expected}
+    validations: {required: true}
+  - type: textarea
+    id: logs
+    attributes: {label: Logs (TOTV_STREAM_CHILD_LOG if relevant), render: text}
