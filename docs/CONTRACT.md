@@ -63,7 +63,7 @@ exactly **12 bytes**, big-endian:
 | 0 | version | must be 1 |
 | 1-2 | seq | uint16; a packet not strictly newer than the last accepted (16-bit wrap-around, `int16(seq-last) > 0`) is dropped |
 | 3-6 | buttons | uint32 bitmask: bit 0 dpad_up, 1 dpad_down, 2 dpad_left, 3 dpad_right, 4 a, 5 b, 6 x, 7 y, 8 l1, 9 r1, 10 l2, 11 r2, 12 l3, 13 r3, 14 start, 15 select, 16 guide (ignored); 17-31 must be 0 |
-| 7-10 | axes | 4 x int8: left X, left Y, right X, right Y (used by N64 and PSP) |
+| 7-10 | axes | 4 x int8: left X, left Y, right X, right Y (used by N64, PSP and PS2; PS2 uses both sticks) |
 | 11 | port | 0..3 |
 
 `a/b/x/y` are physical positions of an Xbox-style pad (a south, b east, x west, y north). Packets of another length or
@@ -86,6 +86,20 @@ SNES and N64 saves are the raw SRAM image (limit 2 MiB on download). A PSP save 
 names relative with `/` only, all below `PSP/SAVEDATA/`, no `..`, no absolute path, no drive letter, no backslash or control
 character, no symlinks, no duplicate names. The component validates every zip it receives before writing a byte to disk and
 only ever packs `PSP/SAVEDATA/`.
+
+## PS2 (prototype): what the Totv must know
+
+- **Core:** `server_pcsx2`, platform `ps2`. Offered in `/v1/health` `cores.ps2` only when a valid BIOS is installed. `health.ps2` is `{bios, reason?, bios_dir_set, bios_files, bios_valid, max_iso_mb, big_tmp}`
+  (`reason` is `bios_missing` or `bios_invalid` when `bios` is false); it is absent when no PS2 core is installed. `ps2.bios=false` means every PS2 session will be refused.
+- **Errors of `POST /v1/sessions`** (HTTP 502, before anything is downloaded): `bios_missing` (no directory, empty, or no candidate files), `bios_invalid` (files exist but none has a valid
+  PS2 ROMDIR: a PS1 BIOS, a truncated dump). Also `rom_invalid` (zip/gzip image), `rom_download_failed` (over `max_iso_mb`), `no_space`, `save_load_failed`.
+- **Image:** `GET /api/games/rom/{mediaId}` serves the ISO/CHD/CSO/ZSO as a file (up to 9 GiB by default); the start can take **minutes** (the component copies it to disk; `POST /v1/sessions`
+  may block up to 10 minutes: the Totv's client timeout must allow it). The server must send `Content-Length` (the free space is checked before the first byte).
+- **Save:** `GET/PUT /api/games/{itemId}/sram` carry a **zip** with exactly these entries and no others: `pcsx2/memcards/Mcd001.ps2` and `pcsx2/memcards/Mcd002.ps2` (raw memory cards, 8650752 bytes each; the
+  component accepts up to 72 MiB per card, 80 MiB unpacked, 64 MiB packed). The Totv needs a `zipSave` type for `ps2` in `server/games/saves.js` that accepts those two names (and refuses everything else
+  or leaves it out), with the same zip rules as the PSP's. A fresh session writes two blank (0xFF) cards, so the first stop uploads a ~17 KB zip even if nothing was played.
+- **BIOS:** nothing for the Totv to send: the operator configures `TOTV_STREAM_PS2_BIOS_DIR` on the component. The Totv should show `bios_missing`/`bios_invalid` to the user as "PS2 BIOS not installed".
+- **Input:** the 12-byte packet is unchanged. Face buttons `a/b/x/y` = Cross/Circle/Square/Triangle, `l1/r1/l2/r2/l3/r3`, `start`, `select`, d-pad; axes 0,1 = left stick, axes 2,3 = right stick.
 
 ## Limits worth knowing
 

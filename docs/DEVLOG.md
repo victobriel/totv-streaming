@@ -1,9 +1,9 @@
 > Development log kept from the prototype phase (measurements on the author's machine). The project overview is in the top-level README.md.
 
-# totv-streaming (prototype 1: SNES; prototype 2: N64 on the GPU, see "N64"; prototype 3: PSP, see "PSP")
+# totv-streaming (prototype 1: SNES; prototype 2: N64 on the GPU, see "N64"; prototype 3: PSP, see "PSP"; prototype 4: PS2, see "PS2")
 
 Streaming component for the Totv (contract: `docs/games-streaming.md` §5, §8, §9 and
-`docs/games-streaming.md` of the Totv repository). Runs ONE libretro core (SNES, N64 or PSP) per session and sends
+`docs/games-streaming.md` of the Totv repository). Runs ONE libretro core (SNES, N64, PSP or PS2) per session and sends
 H.264 Baseline (no B-frames) + Opus over WebRTC, receiving the controller over an unordered DataChannel.
 
 License: GPL-3.0-or-later (see `LICENSE`). Separate repository from the Totv; nothing here goes into the Totv image.
@@ -13,7 +13,7 @@ This is a prototype, not a product.
 **Status:** SNES (snes9x, software render) and N64 (mupen64plus-next + GLideN64 on the GPU through a headless EGL context) are integrated on
 `master` and proved on this PC (see "N64" and the tables below). **PSP (PPSSPP, OpenGL) is a prototype on the branch `psp`** (see "PSP"): it runs
 on the same GPU path at 60 fps with homebrew/own-built ISO and CSO images, and with one commercial game (a commercial PSP game, up to its title/intro screens: 59.94 fps, ~35% of a core), **but real gameplay load is not
-measured**. **PS2 is not integrated, not built and not measured**; what the PSP work says about it is in "PSP", "Verdict".
+measured**. **PS2 (PCSX2 libretro core) is a prototype on the branch `ps2`, no game has ever run on it** (no BIOS and no PS2 image on this machine): see "PS2" for exactly what was and was not proved.
 
 ## Stack and why
 
@@ -500,6 +500,114 @@ What is **not** known: how a real game loads the CPU (the PSP's 333 MHz MIPS run
 - The save zip against a **running** Totv (only the validator function and a fake Totv); the Totv's POST timeout for a long start.
 - Vulkan backend, 2x+ on a real game, other GPUs, Mesa/Intel/AMD (the context code is vendor-neutral; the D-Bus finding and the descriptor audit are NVIDIA-specific observations), PPSSPP ad hoc, `TOTV_STREAM_RW_TMP` as a real size-limited tmpfs in Docker (compose file not updated), unprivileged user namespaces being blocked by Docker's default seccomp profile (the PSP session is refused then, by design).
 - Landlock per thread for PPSSPP's 41 threads (argued from inheritance, not measured).
+
+## PS2 (prototype 4): the PCSX2 libretro core on the same path, WITHOUT a BIOS or a game on this PC
+
+Branch `ps2` (local, from the PSP work). Question: does the heavy-platform plumbing (GL context before the sandbox, `need_fullpath` image, private `/dev/shm`, directory save as a zip, cgroup per
+session) carry a third GPU core, the biggest one, whose BIOS the project can not ship and whose images are 4-9 GB? **Answer so far: everything around the game is proved with a synthetic
+BIOS and a test core; the real core loads, initialises and runs under the full sandbox; NO PS2 GAME HAS EVER RUN** (the machine holds only a PS1 BIOS and no PS2 image). The owner has to provide
+a BIOS dump of their own console and an image to go further; the commands are at the end of this section.
+
+### Which core (checked on 2026-11-23)
+
+| Candidate | Finding |
+|---|---|
+| `libretro/LRPS2` (the name the task gave) | **does not exist any more**: `git ls-remote` asks for credentials (GitHub's answer for a missing repository) and the REST API returns 404 |
+| `libretro/parallel-ps2` (**chosen**) | the live repository of the libretro org with a PCSX2-derived core: its README is titled "LRPS2", `COPYING.GPLv3`, last push 2026-11-22. Pinned at **77e2e0d86cac1b3dd54465d2547b0e7246b9ec3b**. Its headline work is an AArch64 port; on x86-64 it is the x86 PCSX2 recompilers with an OpenGL, a (not built here) Vulkan/paraLLEl-GS and two software renderers. `pcsx2/Memory.c` etc. are mostly LGPL-3.0-or-later, some GPL-3.0-or-later, a few GPL-2.0-or-later, MIT and BSD-3-Clause files (SPDX tags counted in `pcsx2/`), VIXL (BSD-3-Clause) vendored; the whole is **GPL-3.0** (COPYING). Compatible with this project's GPL-3.0-or-later host; **the exact licence still has to be confirmed by the owner (NOTICE.md)** |
+| `jpd002/Play-` (Play!) | `License.txt` is a BSD-style licence (copyright line, two conditions, disclaimer; permissive, GPL-compatible). `libretro/libretro-play` does not exist and `libretro/Play-` redirects to `libretro-mirrors/Play-`, last push 2020-08-17: **not built, not evaluated beyond reading licence and repository state**; kept as the fallback if PCSX2 turns out not to work with a real game |
+
+Build (no cmake, no external library: the core links only libc and libm, libstdc++ is static): `make -j4 IS_X86=1 HAVE_VULKAN=0 HAVE_OPENGL=1` in the clone, nice 15, **about 2 minutes**, `.so` of 8.5 MB, GCC 16.2.
+**Pitfall found:** the Makefile sets `IS_X86` from `uname -p`, which prints `unknown` on this distribution, so `-msse4.1` is missing and the GS files fail with "target specific option mismatch";
+`IS_X86=1` on the command line fixes it (also set in `scripts/fetch-cores.sh pcsx2`, which was written but **not run in the Debian container**: the `.so` of these tests was built on the host).
+`HAVE_VULKAN=0`: the host only creates the OpenGL 4.6 core context, so Vulkan and paraLLEl-GS are not offered (`pcsx2_renderer=OpenGL` is set by the component).
+
+### What the core asks of its host (from its source and from running it)
+
+- System directory `<system>/pcsx2/`: `bios/` (the BIOS), `memcards/` (`Mcd001.ps2`, `Mcd002.ps2`, **8650752 bytes each**, created blank = all 0xFF when the VM starts), `cache/` (GL program binary cache `gl_programs.bin`, 2.9 MB after the first run), `cheats*`. It also writes **next to the BIOS** (`.mec`, `.nvm`): the BIOS directory must be writable, which is why the component copies the BIOS per session (below).
+- `need_fullpath` (the image is opened by path; the core's own readers do ISO, CHD, CSO, ZSO).
+- A **4 GiB fastmem area** (`Fastmem area: 0x7f..-0x7f..`, sparse) built on a shared-memory file: **without the private `/dev/shm` the core fails** (`Could not set up the host memory maps`, `(CodeReserve) Failed to allocate ...`) **and then segfaults** (seen). With `shm=1` it initialises. Touched shm at the BIOS idle: 261 MB.
+- JIT: anonymous RWX mappings (EE, IOP, VU recompilers). Neither the seccomp filter nor Landlock restricts `mmap/mprotect` with `PROT_EXEC` of anonymous memory, so nothing had to be relaxed (see "Isolation").
+- Pad: `retro_input_state` with `RETRO_DEVICE_JOYPAD` + `ID_JOYPAD_MASK`, the pressure of the face buttons through `RETRO_DEVICE_ANALOG`/`INDEX_ANALOG_BUTTON` (the host answers 0 there and the core then uses the digital bit as a full press), both analog sticks.
+
+### BIOS: how the Totv/the user provides it (the component NEVER distributes one)
+
+- The operator puts dumps of **their own console** (`scph*.bin`, optionally `.rom1/.rom2/.erom/.nvm/.mec` beside it) in a directory and sets **`TOTV_STREAM_PS2_BIOS_DIR`** (a read-only directory is fine). The component reads it; **the core can never read it** (not in the Landlock rules).
+- Per session the parent picks the first valid file (name order), and **copies** it with its companions into the session's writable directory `<rw>/pcsx2/bios/` (the core writes `.nvm/.mec` there; the copy is `O_EXCL`, 0600, `O_NOFOLLOW` on the source, 16 MiB at most), sets `v.pcsx2_bios=<name>` (a plain name: no `/ ; = ..`), and the copy disappears with the session. The operator's directory is not touched (test: listing and mtimes identical before and after).
+- **Validity** is the core's own test, repeated in Go (`ps2BiosCheck`, from `pcsx2/ps2/BiosTools.c`): size 1..16 MiB, a `RESET` entry in the ROMDIR table at the start, and a `ROMVER` entry whose 14 bytes are text. No directory, an empty one or only companions: **`bios_missing`**; files that are there but none valid (a PS1 BIOS, a truncated dump, no `ROMVER`): **`bios_invalid`**. Symlinks are skipped.
+- **The session is refused before a byte of the image is downloaded**: `POST /v1/sessions` -> 502 `{"error":"bios_missing"}` / `{"error":"bios_invalid"}`. `/v1/health` has `"ps2": {"bios": false, "reason": "bios_missing", "bios_dir_set": false, "bios_files": 0, "bios_valid": 0, "max_iso_mb": 9216, "big_tmp": "..."}` (re-read on every request; no file name is ever reported); `cores.ps2` is listed only when the BIOS is valid. The start of the component logs a WARNING when the BIOS is missing.
+- Proved against the REAL PS1 BIOS of this machine (an owner-supplied dump kept outside the repository, read-only, never copied into it: the test reads it into a temporary directory): the component answers `bios_invalid` (`TestRealPS2NoBIOSAndPS1BIOS`), and **the real core says the same when it is given that file** (`Could not find any valid PS2 BIOS File in ".../pcsx2/bios"`, game load fails, exit 2): the component's check and the core's agree.
+
+### The image: by path, up to 9 GiB, on DISK, read-only for the core
+
+- Same mechanism as the PSP (`rom/` directory with only the image, Landlock read-only on it, the host never reads it into memory; the parent sniffs `MComprHD`/`CISO`/`ZISO` to name the file `.chd/.cso/.zso`, anything else `.iso`; zip/gzip are refused as `rom_invalid`).
+- Ceiling `TOTV_STREAM_PS2_MAX_ISO_MB` (default **9216**); `Content-Length` over it is refused before writing; `statfs` of the destination before the first byte (`no_space`, needs size + 64 MiB); `POST /v1/sessions` may wait up to **10 minutes** for the copy (the Totv's client must allow it; the PSP's was 60 s). The `emu/host.c` size check went from 4 GiB to 16 GiB (the component's own ceiling decides).
+- **Where it goes:** a 9 GiB image does not fit in RAM next to the emulator, so the session directory (`ses-N/`: `rom/`) of a PS2 session is created in **`TOTV_STREAM_BIG_TMP`** (default `TOTV_STREAM_TMP`), which must be a **disk** directory; the writable directory (BIOS copy, cards, shader cache; quota 512 MiB) stays in `TOTV_STREAM_RW_TMP`, the size-limited tmpfs, as for the PSP. At start the component warns when `BIG_TMP` is a tmpfs smaller than ceiling + 4 GiB. Orphan `ses-N` directories in it are removed at start; the directory is removed at the end of every session (tested, also for refused sessions).
+- **Read-in-place instead of a copy (Range/fd sharing): evaluated, not done.** The core opens a path under Landlock with no network; the only ways are a hard link/reflink of a file the Totv already keeps on the same filesystem (needs the Totv to hand over a path, a change of contract and trust) or a FUSE/NBD mount (needs privileges). A copy costs ~2.6 s for 5 GiB on this NVMe (page cache; a cold 8 GB disc takes what the disk takes) and disk space per session. Kept as an evolution.
+- Tested with a **5 GiB sparse image** (`PS2_BIG_GB=5`): up in 2.6 s, child peak RSS 3.5-3.9 MB, the core read its head and tail (so a size above 4 GiB is handled everywhere), the session directory is gone afterwards; the default test uses 1.5 GiB.
+
+### Saves: the memory cards as a zip (`savezip.go`, `ps2.go`)
+
+- Package = a classic zip with **exactly** `pcsx2/memcards/Mcd001.ps2` and `pcsx2/memcards/Mcd002.ps2` (names fixed, nothing else is ever packed or restored: not the BIOS, not `.nvm/.mec`, not the shader cache; other names are ignored on the way in, like names outside the prefix). Same zip rules as the PSP (`PUT/GET /api/games/:itemId/sram`, no ZIP64, no symlinks, no `..`, ...); limits: 72 MiB per card, 80 MiB unpacked, 64 MiB packed, 16 entries counted (ignored ones included). Implemented as `saveLimits.Only` (an exact-name allow-list; the PSP leaves it nil: unchanged).
+- A session always creates the two blank cards, so the first stop uploads a **~17 KB zip** (8.6 MB of 0xFF compress to nothing); a game that saves makes it bigger. The next session restores both files before the core starts (checked: counter written into the card by the test core goes 1 -> 2 across sessions).
+- **What the Totv needs** (`server/games/saves.js`, not touched here): a `zipSave` type for platform `ps2` whose accepted names are those two files below `pcsx2/memcards/` (anything else refused or left out), with the PSP's limits adjusted (an entry up to 72 MiB, packed 64 MiB). The saves of an in-game save dialog and of the BIOS browser were not exercised (no game, no BIOS).
+
+### Controller
+
+The PS2 pad is the RetroPad one to one (`pcsx2/PAD/PAD.c`): `a/b/x/y` -> Cross/Circle/Square/Triangle (RetroPad B/A/Y/X), `l1/r1` -> L1/R1, `l2/r2` -> L2/R2, `l3/r3`, `start`, `select`, d-pad; `guide` ignored. It is exactly the default table (`padToRetroPS2 = padToRetro`).
+**Both analog sticks are covered by the 12-byte packet**: its four int8 axes are left X, left Y, **right X, right Y**, handed to the core as `RETRO_DEVICE_INDEX_ANALOG_LEFT` and `..._RIGHT` (x256, so 127 -> 32512, -128 -> -32768). `pcsx2_analog_mode1/2=enabled` starts the pad in analog mode (the packet has no ANALOG button bit; a game that expects the user to press it would otherwise stay digital). Proved end to end (`TestPS2InputReachesTheCoreBothSticks`): over a real WebRTC DataChannel each of the 16 buttons arrives as the expected RetroPad bit and `{127,-128,64,-64}` arrives as `{32512,-32768,16384,-16384}`, the right stick alone with two buttons included. Not proved: that a real game reads them (no game).
+
+### Isolation: the real core under the full sandbox (flags 1023)
+
+`sandboxFlags=1023` for the real core through the component: seccomp (1), Landlock (2), Landlock net (4), netns (8), GPU context before the sandbox (16), private `/dev/shm` (32), Landlock signal scope (64), own IPC namespace (128), GPU descriptors closed (256), own PID namespace (512). `/proc/<pid>`: **3 threads, all `Seccomp: 2` + `NoNewPrivs: 1`, `CapEff: 0`** at the BIOS idle (a game may create more threads: the core also has an MTVU and a software-renderer thread pool; `pids.max` stays 256 per session; **not measured with a game**).
+
+| Item | Relaxed? |
+|---|---|
+| seccomp deny-list | **no change**. The JIT (anonymous `mmap` with `PROT_EXEC`, `mprotect`), SIGSEGV handlers for fastmem, threads: all work as they are (`fork`/`clone` without `CLONE_THREAD`, sockets, `ptrace`, `unshare`, `clone3`... stay denied). The code reserve (the RWX area of the recompilers) was allocated without any `CodeReserve` error and the BIOS loop ran for 20 s (it is not proved that every recompiler emitted code: the loop is one block; the test core executes a written RWX page and an `mprotect` to RX, which is the pattern) |
+| Landlock | **no change** except what the PSP already had: read-only on the image directory, read/write on ONE directory. For PS2 that directory is also the **system directory** (`GET_SYSTEM_DIRECTORY` = `GET_SAVE_DIRECTORY` = `<rw>`, because PCSX2 keeps `bios/`, `memcards/`, `cache/` under `<system>/pcsx2/`); there is no read-only assets directory. `EXECUTE` is still denied (no exec of files). The operator's BIOS directory is NOT readable by the core |
+| private `/dev/shm` | the PSP mechanism (own mount namespace + `tmpfs`), **size per core**: new host option `shmmb=` (PSP stays 512 MiB, PS2 **1024 MiB**; 261 MB touched at the BIOS idle) |
+| cgroup memory | **4096 MiB per PS2 session** (`coreInfo.memMB`, never below an operator's higher `TOTV_STREAM_SESSION_MEM_MB`) instead of 3072: the idle core is at 790 MB RSS (245 MB anonymous + 261 MB shm + driver); a game adds the GS targets and texture cache (1-2 GiB is what PCSX2 users report; **not measured**). Proved enforced: `TEST_CGROUP=require` run of the real core through `systemd-run --user --scope` read back `memory.max=4096M` and passed |
+| `TOTV_STREAM_RW_TMP` | unchanged rule (a size-limited tmpfs, quota 512 MiB and 20000 entries, now counting the 4 MiB BIOS copy and the cards' **logical** size, ~21.5 MiB at rest); the BIG_TMP is a disk directory |
+| uid / user namespace | unchanged: the PS2 session needs unprivileged user+mount namespaces as the PSP does (refused otherwise) |
+
+What stays open for PS2 specifically: a JIT means a W+X mapping in the core's process by nature; a hostile BIOS/image is parsed by the ISO/CHD/CSO readers and the BIOS loader with the full surface of PCSX2 (HLE, IOP modules, CDVD, SPU2, DEV9 -- DEV9 is networking code: the core's own network stack is dead in the sandbox, no sockets); the NVIDIA ioctl surface as for N64/PSP.
+
+### Measured on this PC (synthetic BIOS: a valid ROMDIR + `b .` loop written by `syntheticPS2BIOS`, a 3 MB junk image; **nothing is drawn, the numbers are for a core that runs an idle loop**)
+
+| Command | Result |
+|---|---|
+| `PS2=1 go test -run 'TestRealPS2$' -v .` (the real core through the component) | session up in **5.6 s**; hello `59.94 fps`, `48000 Hz`; flags **1023**; 3 threads all filtered; VmRSS **794 MB** (anon 254 MB, shm 261 MB); `audioPackets` 720 in 12 s (the core runs frames: 60 Hz); `retro_run` avg **1.24 ms** (max 3.1) -- meaningless for a game, the EE is spinning in an idle-skipped loop; `framesIn=0` (the BIOS draws nothing; no `V` messages: expected); GL log lines from the core: `Using hardware for point expansion...`, `1 program binary formats supported by driver`, `GS: pool prewarmed, 13 target sizes, 11 MB`, `Resuming...`. Stop: `saved=true`, package **17198 bytes** zipped, two cards of 8650752 bytes, blank (0xFF); a second session restores them |
+| same, `TEST_CGROUP=require` | passed (per-session cgroup read back) |
+| `PS2=1 PS2_PS1_BIOS=<ps1 dump> go test -run TestRealPS2NoBIOSAndPS1BIOS` | no BIOS directory -> 502 `bios_missing` + `health.ps2.bios=false`; PS1 BIOS -> 502 `bios_invalid`; nothing left in the big tmp |
+| the same loop through `retro-emu` directly | without `shm=1`: segfault; with it: runs; real BIOS absent: the core logs `Could not find any valid PS2 BIOS File` and `retro_load_game` fails |
+| `make test` (`go vet` + `go test -race -count=1 ./...`) | passes (48.6 s) with all new PS2 tests |
+| re-run of the older real tests after the host changes | SNES (`TestSNESKeepsStreaming`, `TestRealSNES`) pass; N64 `TestRealN64`: 60.01 fps, flags 991; PSP `TestRealPSP` with a commercial ISO: 59.93-59.96 fps, flags 1023, 41 threads all filtered |
+
+### Tests (PS2)
+
+| Test | What it proves | Needs |
+|---|---|---|
+| `TestPS2BiosScan` | 12 cases: no/empty/missing dir, companions only, a PS1 BIOS, no `RESET`, no `ROMVER`, non-text `ROMVER`, too small, valid, invalid first + valid second, symlink skipped; companions picked up | nothing |
+| `TestPS2HealthAndRefusals` | `health.ps2` in the three states, the core is offered only with a valid BIOS, `bios_missing`/`bios_invalid` before any download, no file names leaked, nothing left in the big tmp | nothing |
+| `TestPS2FullPathBIOSAndCards` (`PS2_BIG_GB=5`) | the whole path with `ps2core` (need_fullpath, RWX JIT-like page, shm, BIOS copy writable, cards): 1.5 GiB/5 GiB image on the disk tmp, peak RSS < 4 MB, BIOS copy and companion present and no foreign file, the core writes `.nvm` next to its copy, the operator's directory unchanged, zip with exactly the two cards, counter 1 -> 2 | nothing (disk space) |
+| `TestPS2RefusesHostileSaveAndImage` | `..` name refuses the package; other names ignored and not extracted; zip image refused; ceiling; `no_space` | nothing |
+| `TestPS2QuotaEndsAFillingCore` | a core that fills its directory is ended and uploads nothing | nothing |
+| `TestPS2InputReachesTheCoreBothSticks` | 16 buttons + both sticks end to end over WebRTC | nothing |
+| `TestPS2ButtonMapping`, `TestPS2ROMExtAndHostOptions`, `TestPS2CgroupMemory`, `TestPS2BigTmpWarning`, `TestPS2SaveZipOnlyTheCards` | mapping written out from the core's source, image sniffing, option sanitising (a BIOS name with `; = / ..` never reaches the host, an override can not replace `pcsx2_bios` or the shared cards), memory per core, big-tmp rules, the two-card zip | nothing |
+| `TestRealPS2` (`make ps2`) | synthetic mode (no `PS2_ROM`): see the table above; real mode below | `PS2=1`, `cores/pcsx2_libretro.so`, a GPU |
+| `TestRealPS2NoBIOSAndPS1BIOS` | the error paths with the real core installed | same (+ `PS2_PS1_BIOS=<file>` for the invalid half) |
+
+**The test the owner runs with their own files:** `PS2=1 PS2_ROM=<image> PS2_BIOS_DIR=<dir with your BIOS> PS2_OUT=<png dir> make ps2` (optional `PS2_SECS`, `PS2_DRIVE_BUTTONS=start,cross`, `PS2_DRIVE_START`, `PS2_DRIVE_EVERY`, `PS2_CORE_OPTS`). Real mode decodes the stream, takes a PNG every 10 s, counts distinct decoded frames, checks audio, threads, RSS, the zip of the cards and a second session restoring them.
+
+### Not proved (honest list)
+
+- **A game.** Not one PS2 frame was drawn. No frame rate, no CPU/GPU/RAM under load (the idle numbers above are not an estimate of a game), no latency (the PSP needed 100 ms input to picture, the PS2 has the same core-side two-frame pipeline plus the EE/GS threads: expect the same or worse; unmeasured), no 30-minute run, no memory growth, no shader-compile stutter (the program cache is rebuilt in every session because the cache lives in the session's tmpfs: **a shared read-only cache across sessions is an evolution**).
+- **That the OpenGL renderer works for a real game** (the core created its GL objects and pre-warmed its pools on the host's context; whether PCSX2's GL backend renders correctly on this driver is unknown), the per-game hacks, the GameDB (12807 entries loaded).
+- A BIOS other than the synthetic one; BIOS `.rom1/.rom2/.erom` handling (copied, not exercised by the core); the fast-boot path (needs a valid disc); CHD/CSO/ZSO readers; images of 4-9 GB through the real core (5 GiB only through the test core); a dual-layer DVD.
+- The memory cards as a game uses them (formatted, with saves), the BIOS memory-card browser, save states.
+- The Totv side (`zipSave` for ps2, the 10-minute POST, `cores.ps2` / `health.ps2` handling) and Docker: `scripts/fetch-cores.sh pcsx2` was not run in the container, the compose example has no BIG_TMP volume nor a BIOS mount (needs: a disk volume at `TOTV_STREAM_BIG_TMP`, a read-only mount at `TOTV_STREAM_PS2_BIOS_DIR`, `mem_limit` of at least 6 GiB), `docker/seccomp-totv.json` was not re-checked.
+- Vulkan/paraLLEl-GS, the software renderers (not selected), upscaling above 1x, multitap/second pad, USB/DEV9/HDD (DEV9 logs `open r+: DEV9hdd.raw` at start, the file does not exist and nothing was created; the core has no network: sockets are denied), other GPUs, Mesa.
+- Whether the host's 640x480 stream size (NTSC 4:3 frame is 640x448, PAL 640x512; the host scales the whole frame) is right for 16:9 games: not examined.
+
 
 ## Docker
 
