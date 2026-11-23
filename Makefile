@@ -1,7 +1,7 @@
 # totv-streaming (GPL-3.0-or-later)
 .PHONY: all emu build test clean latency snes
 all: emu build
-emu: bin/retro-emu bin/glcore_libretro.so bin/pspcore_libretro.so bin/testcore_libretro.so bin/testcore565_libretro.so bin/testcore1555_libretro.so bin/threadcore_libretro.so bin/attackcore_libretro.so bin/glhogt_libretro.so bin/glhogm_libretro.so
+emu: bin/retro-emu bin/glcore_libretro.so bin/pspcore_libretro.so bin/ps2core_libretro.so bin/testcore_libretro.so bin/testcore565_libretro.so bin/testcore1555_libretro.so bin/threadcore_libretro.so bin/attackcore_libretro.so bin/glhogt_libretro.so bin/glhogm_libretro.so
 # GPU (HW_RENDER) support is compiled in when the EGL/GL headers exist; libEGL is dlopen()ed at run time, never linked.
 HAVE_EGL := $(shell test -e /usr/include/EGL/egl.h -a -e /usr/include/GL/glext.h && echo -DHAVE_EGL)
 bin/retro-emu: emu/host.c emu/glhost.h emu/libretro.h
@@ -16,6 +16,8 @@ bin/testcore_libretro.so: emu/testcore/testcore.c emu/libretro.h
 	@mkdir -p bin && gcc -O2 -Wall -shared -fPIC -o $@ emu/testcore/testcore.c -lm
 bin/pspcore_libretro.so: emu/testcore/testcore.c emu/libretro.h
 	@mkdir -p bin && gcc -O2 -Wall -shared -fPIC -DTC_FULLPATH -o $@ emu/testcore/testcore.c -lm -lrt
+bin/ps2core_libretro.so: emu/testcore/testcore.c emu/libretro.h
+	@mkdir -p bin && gcc -O2 -Wall -shared -fPIC -DTC_PS2 -o $@ emu/testcore/testcore.c -lm -lrt
 bin/threadcore_libretro.so: emu/testcore/testcore.c emu/libretro.h
 	@mkdir -p bin && gcc -O2 -Wall -shared -fPIC -DTC_THREAD -o $@ emu/testcore/testcore.c -lm -lpthread
 bin/attackcore_libretro.so: emu/testcore/testcore.c emu/libretro.h
@@ -52,3 +54,9 @@ psp: emu
 	PSP=1 go test -count=1 -run 'TestRealPSP$$' -v -timeout 300s .
 	PSP=1 go test -count=1 -run TestRealPSPLatency -v -timeout 300s .
 .PHONY: psp
+
+# real PS2 (needs cores/pcsx2_libretro.so, scripts/fetch-cores.sh builds it). Without PS2_ROM/PS2_BIOS_DIR the target runs the synthetic-BIOS sandbox
+# test; with PS2_ROM=<image outside the repo> and PS2_BIOS_DIR=<your own BIOS dir> it runs the real game test.
+ps2: emu
+	PS2=1 go test -count=1 -run 'TestRealPS2' -v -timeout 600s .
+.PHONY: ps2

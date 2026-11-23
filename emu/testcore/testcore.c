@@ -23,7 +23,7 @@
 #define H 240
 #define RATE 48000.0
 static retro_environment_t env; static retro_video_refresh_t vid; static retro_audio_sample_batch_t aud; static retro_input_poll_t poll_; static retro_input_state_t inp;
-#ifdef TC_FULLPATH
+#if defined(TC_FULLPATH) || defined(TC_PS2)
 #define TC_NOSRAM 1
 #else
 #define TC_NOSRAM 0
@@ -55,7 +55,7 @@ void retro_init(void) { unsigned f = TC_PF; env(RETRO_ENVIRONMENT_SET_PIXEL_FORM
 void retro_deinit(void) {}
 unsigned retro_api_version(void) { return RETRO_API_VERSION; }
 void retro_get_system_info(struct retro_system_info *i) { memset(i, 0, sizeof *i); i->library_name = "testcore"; i->library_version = "1"; i->valid_extensions = "*";
-#ifdef TC_FULLPATH
+#if defined(TC_FULLPATH) || defined(TC_PS2)
     i->need_fullpath = true; i->block_extract = true;
 #endif
 }
@@ -139,12 +139,92 @@ static int fullpath_probe(const struct retro_game_info *g) {
     return 1;
 }
 #endif
+#ifdef TC_PS2
+/* PS2-like core (build with -DTC_PS2): the contract of PCSX2's libretro core without the emulator. need_fullpath (an image of GB: only its first and last
+ * bytes are read, so a sparse 5 GiB file costs nothing); the BIOS is expected in <system>/pcsx2/bios (a copy made by the component, WRITABLE: PCSX2 writes
+ * .nvm/.mec next to it); the memory cards live in <system>/pcsx2/memcards/Mcd001.ps2 and Mcd002.ps2 (8650752 bytes); a JIT-like RWX anonymous mapping must
+ * work; /dev/shm must be private. Mcd001.ps2 also carries a log the tests read: offset 0 session counter, offset 4096 the last input seen
+ * (u16 RetroPad mask, 4 x int16 analog: left X, left Y, right X, right Y) and a counter of input changes. */
+#include <dirent.h>
+#ifndef RETRO_DEVICE_ID_ANALOG_X
+#define RETRO_DEVICE_ID_ANALOG_X 0
+#endif
+#ifndef RETRO_DEVICE_ID_ANALOG_Y
+#define RETRO_DEVICE_ID_ANALOG_Y 1
+#endif
+#ifndef RETRO_DEVICE_INDEX_ANALOG_RIGHT
+#define RETRO_DEVICE_INDEX_ANALOG_RIGHT 1
+#endif
+#ifndef RETRO_DEVICE_INDEX_ANALOG_LEFT
+#define RETRO_DEVICE_INDEX_ANALOG_LEFT 0
+#endif
+#define MCD_SIZE 8650752
+static int probe_ok; static unsigned save_count; static FILE *mcd; static char ps2mode[9];
+#define PFAIL() (dprintf(2, "ps2core probe failed at line %d (errno %d)\n", __LINE__, errno), 0)
+static int ps2_probe(const struct retro_game_info *g) {
+    if (!g || !g->path || g->data) return PFAIL();
+    FILE *f = fopen(g->path, "rb"); if (!f) return PFAIL();
+    char magic[16] = ""; if (fread(magic, 1, 16, f) != 16) { fclose(f); return PFAIL(); }
+    if (fseeko(f, 0, SEEK_END) || ftello(f) < 16) { fclose(f); return PFAIL(); }
+    off_t sz = ftello(f); char tail[8]; if (fseeko(f, sz - 8, SEEK_SET) || fread(tail, 1, 8, f) != 8) { fclose(f); return PFAIL(); } fclose(f);
+    if (memcmp(magic, "PS2TEST1", 8)) return PFAIL();
+    memcpy(ps2mode, magic + 8, 8);
+    char dir[4096], p[4400]; snprintf(dir, sizeof dir, "%s", g->path); char *sl = strrchr(dir, '/'); if (!sl) return PFAIL(); *sl = 0;
+    FILE *w = fopen(g->path, "r+b"); if (w) { fclose(w); return PFAIL(); }                 /* the image is read-only */
+    snprintf(p, sizeof p, "%s/evil", dir); w = fopen(p, "wb"); if (w) { fclose(w); return PFAIL(); }
+    int e = open("/etc/passwd", O_RDONLY); if (e >= 0) { close(e); return PFAIL(); }
+    int sf = shm_open("/totv_probe", O_RDWR | O_CREAT | O_EXCL, 0600); if (sf < 0) return PFAIL(); /* PCSX2's 4 GiB map is a shm file */
+    shm_unlink("/totv_probe"); if (ftruncate(sf, 64 << 20)) return PFAIL();
+    void *mm = mmap(NULL, 64 << 20, PROT_READ | PROT_WRITE, MAP_SHARED, sf, 0); if (mm == MAP_FAILED) return PFAIL(); ((char *)mm)[(64 << 20) - 1] = 1; munmap(mm, 64 << 20); close(sf);
+    int hm = open("/dev/shm/totv-host-marker", O_RDONLY); if (hm >= 0) { close(hm); return PFAIL(); }
+#if defined(__x86_64__)
+    { /* the JIT: an anonymous RWX mapping, code written and called */
+        unsigned char *c = mmap(NULL, 1 << 16, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); if (c == MAP_FAILED) return PFAIL();
+        c[0] = 0xB8; c[1] = 42; c[2] = c[3] = c[4] = 0; c[5] = 0xC3; /* mov eax,42 ; ret */
+        if (((int (*)(void))c)() != 42) return PFAIL();
+        if (mprotect(c, 1 << 16, PROT_READ | PROT_EXEC)) return PFAIL();
+        if (((int (*)(void))c)() != 42) return PFAIL();
+        munmap(c, 1 << 16);
+    }
+#endif
+    const char *sys = NULL; if (!env(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &sys) || !sys) return PFAIL();
+    snprintf(p, sizeof p, "%s/pcsx2", sys); mkdir(p, 0700);
+    snprintf(p, sizeof p, "%s/pcsx2/cache", sys); mkdir(p, 0700); snprintf(p, sizeof p, "%s/pcsx2/cache/gl_programs.bin", sys); w = fopen(p, "wb"); if (!w) return PFAIL(); fputs("cache", w); fclose(w);
+    snprintf(p, sizeof p, "%s/pcsx2/bios", sys);
+    DIR *d = opendir(p); if (!d) { dprintf(2, "ps2core: Could not find any valid PS2 BIOS File in \"%s\"\n", p); return 0; }
+    char bios[9000] = ""; struct dirent *de;
+    while ((de = readdir(d))) { size_t n = strlen(de->d_name); if (n > 4 && !strcmp(de->d_name + n - 4, ".bin")) { snprintf(bios, sizeof bios, "%s/%s", p, de->d_name); break; } }
+    closedir(d);
+    if (!bios[0]) { dprintf(2, "ps2core: Could not find any valid PS2 BIOS File in \"%s\"\n", p); return 0; }
+    FILE *bf = fopen(bios, "rb"); if (!bf) return PFAIL(); static unsigned char bh[1 << 15]; size_t bn = fread(bh, 1, sizeof bh, bf); fclose(bf);
+    int has_reset = 0; for (size_t i = 0; i + 16 <= bn; i += 16) if (!memcmp(bh + i, "RESET\0", 6)) has_reset = 1;
+    if (!has_reset) { dprintf(2, "ps2core: the BIOS has no RESET entry\n"); return 0; }
+    snprintf(p, sizeof p, "%s.nvm", bios); w = fopen(p, "wb"); if (!w) return PFAIL(); fputs("nvm", w); fclose(w); /* PCSX2 writes .nvm/.mec next to the BIOS */
+    snprintf(p, sizeof p, "%s/pcsx2/lnk", sys); if (symlink("/etc/passwd", p) == 0) return PFAIL(); /* no symlinks */
+    snprintf(p, sizeof p, "%s/../escape", sys); w = fopen(p, "wb"); if (w) { fclose(w); return PFAIL(); }
+    snprintf(p, sizeof p, "%s/pcsx2/memcards", sys); mkdir(p, 0700);
+    for (int slot = 1; slot <= 2; slot++) {
+        snprintf(p, sizeof p, "%s/pcsx2/memcards/Mcd00%d.ps2", sys, slot);
+        int fd = open(p, O_RDWR | O_CREAT, 0600); if (fd < 0) return PFAIL();
+        struct stat st; fstat(fd, &st); if (st.st_size == 0 && ftruncate(fd, MCD_SIZE)) return PFAIL(); /* a formatted card is not zeros; a sparse file is enough here */
+        if (slot == 1) { unsigned c = 0; if (pread(fd, &c, 4, 0) != 4) c = 0; save_count = c + 1; if (pwrite(fd, &save_count, 4, 0) != 4) return PFAIL(); }
+        close(fd);
+    }
+    snprintf(p, sizeof p, "%s/pcsx2/memcards/Mcd001.ps2", sys); mcd = fopen(p, "r+b"); if (!mcd) return PFAIL();
+    if (!strncmp(ps2mode, "FILLRW", 6)) { snprintf(p, sizeof p, "%s/pcsx2/cache/fill.bin", sys); int bf2 = open(p, O_WRONLY | O_CREAT, 0600); if (bf2 < 0) return PFAIL();
+        static char blk[65536]; for (int i = 0; i < 48; i++) if (write(bf2, blk, sizeof blk) != (ssize_t)sizeof blk) return PFAIL(); close(bf2); }
+    return 1;
+}
+#endif
 bool retro_load_game(const struct retro_game_info *g) {
 #ifdef TC_ATTACK
     if (getenv("ATTACK_LOAD")) attack("load");
 #endif
 #ifdef TC_FULLPATH
     probe_ok = fullpath_probe(g); return probe_ok; /* a failing probe refuses the game: the session fails loudly instead of showing red */
+#endif
+#ifdef TC_PS2
+    probe_ok = ps2_probe(g); return probe_ok;
 #endif
     if (g && g->data && g->size >= 8 && !memcmp(g->data, "SBXPROBE", 8)) {
         int late = open("/etc/passwd", O_RDONLY); if (late >= 0) close(late);
@@ -155,12 +235,12 @@ bool retro_load_game(const struct retro_game_info *g) {
     return true;
 }
 void retro_unload_game(void) {}
-#ifdef TC_FULLPATH
+#if defined(TC_FULLPATH) || defined(TC_PS2)
 size_t retro_get_memory_size(unsigned id) { (void)id; return 0; } /* a directory save, like PSP: no SAVE_RAM */
 #else
 size_t retro_get_memory_size(unsigned id) { return id == RETRO_MEMORY_SAVE_RAM ? sizeof sram : 0; }
 #endif
-#ifdef TC_FULLPATH
+#if defined(TC_FULLPATH) || defined(TC_PS2)
 void *retro_get_memory_data(unsigned id) { (void)id; return 0; }
 #else
 void *retro_get_memory_data(unsigned id) { return id == RETRO_MEMORY_SAVE_RAM ? sram : 0; }
@@ -180,6 +260,19 @@ void retro_run(void) {
 #endif
     if (frame == 0 && !TC_NOSRAM) { uint32_t n; memcpy(&n, sram, 4); n++; memcpy(sram, &n, 4); }
     poll_();
+#ifdef TC_PS2
+    { /* what the pad says now: RetroPad mask and the two sticks, written to the card file (offset 4096) when it changes, with a change counter */
+        static unsigned short lm; static short lax[4]; static unsigned changes; static int first = 1;
+        unsigned short m = (unsigned short)inp(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_MASK);
+        short ax[4] = { inp(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X), inp(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y),
+                        inp(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X), inp(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y) };
+        if (mcd && (first || m != lm || memcmp(ax, lax, sizeof ax))) {
+            first = 0; lm = m; memcpy(lax, ax, sizeof ax); changes++;
+            unsigned char rec[16]; memcpy(rec, &m, 2); memcpy(rec + 2, ax, 8); memcpy(rec + 10, &changes, 4); rec[14] = rec[15] = 0;
+            fseek(mcd, 4096, SEEK_SET); fwrite(rec, 1, sizeof rec, mcd); fflush(mcd);
+        }
+    }
+#endif
     int a = inp(0, RETRO_DEVICE_JOYPAD, 0, 8);
     for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) fb[y * W + x] = a ? 0xFFFFFF : (uint32_t)((x * 255 / W) << 16 | (y * 255 / H) << 8 | 0x40);
     if (!a) {
