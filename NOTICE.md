@@ -12,6 +12,7 @@ marked "in repo".
 | mupen64plus-libretro-nx (mupen64plus-next) | GPL-2.0, some parts "or later"; **to be confirmed** at the pinned commit (check the upstream tree) | https://github.com/libretro/mupen64plus-libretro-nx |
 | GLideN64 (inside mupen64plus-next) | GPL-2.0, parts "or later"; **to be confirmed** at the pinned commit | https://github.com/gonetz/GLideN64 |
 | PPSSPP (libretro build) | GPL-2.0-or-later | https://github.com/hrydgard/ppsspp/blob/master/LICENSE.TXT |
+| PCSX2 libretro core (`libretro/parallel-ps2`, README titled "LRPS2"; `scripts/fetch-cores.sh pcsx2`) | **GPL-3.0** as a whole (`COPYING.GPLv3` in the tree); the source headers say LGPL-3.0-or-later (most), GPL-3.0-or-later, a few GPL-2.0-or-later, MIT and BSD-3-Clause files; vendored VIXL is BSD-3-Clause. **To be confirmed by the owner at the pinned commit.** GPL-3.0 is compatible with this project's GPL-3.0-or-later host (no GPL-2.0-only problem as with the N64 core) | https://github.com/libretro/parallel-ps2 |
 
 **GPL-2.0 versus GPL-3.0 (read this).** `emu/host.c` (GPL-3.0-or-later) loads each core with `dlopen` into the **same process**; it is
 not a separate program. A GPL-3.0-or-later host together with a GPL-2.0-**only** core is incompatible for **joint distribution**
@@ -20,6 +21,12 @@ local use this project documents is not affected. The cores are never distribute
 decides**: relicense `emu/` (own code) as GPL-2.0-or-later, which is compatible with GPL-2.0-only cores and with GPL-3.0 parts
 (listed in [ROADMAP.md](ROADMAP.md)). Note that the Go program links x264 (GPL-2.0-or-later) and talks to the host over pipes,
 which is a separate question from the in-process core loading.
+
+**PS2.** The PS2 core needs a **console BIOS** (`scph*.bin` plus optional `.rom1/.rom2/.erom`) that is **never** downloaded, copied into this
+repository, or put in an image: the operator provides a dump of their own console in `TOTV_STREAM_PS2_BIOS_DIR` (see README "PS2"). The only "BIOS" in the
+repository is the synthetic test image the tests write at run time (a valid ROMDIR table around a one-instruction loop, no console code). The alternative
+considered, Play! (`jpd002/Play-`), has a BSD-style license (`License.txt`: copyright notice, two conditions and a disclaimer); it was only
+read about, not built, and its libretro port was not found alive (see docs/DEVLOG.md, "PS2").
 
 PPSSPP assets (`ppge_atlas.zim`, `font_atlas.zim`, `compat.ini`, language files) are installed by `scripts/psp-assets.sh`
 from the PPSSPP source tree and follow the PPSSPP license. In repo: its license text

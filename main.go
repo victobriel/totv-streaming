@@ -31,6 +31,8 @@ type config struct {
 	GPUDevices                                       string // device nodes a HW_RENDER core may still open after the sandbox
 	ReadbackPBO, N64Internal2x                       bool
 	N64CoreOpts                                      string // extra mupen64plus core options "k=v;k=v" (experiments)
+	PS2BiosDir, BigTmp, PS2CoreOpts                  string // PS2: operator's BIOS directory (read by the parent, copied per session), disk directory for big images, extra core options
+	PS2MaxISOMB                                      int    // PS2 image ceiling in MiB (0 = 9 GiB)
 	PSPSystemDir, RWTmp, PSPCoreOpts                 string // PSP: read-only dir that holds PPSSPP/ (assets), writable tmpfs root for the memory stick, extra core options
 	N64Overscan, N64Aspect                           string // "l,r,t,b" crop in N64 320x240 pixels ("" = default, "off"); "" or "16:9" widescreen
 	MaxSessions, W, H, Kbps                          int
@@ -84,6 +86,10 @@ func loadConfig() config {
 		PSPSystemDir:     env("TOTV_STREAM_PSP_SYSTEM", filepath.Join(env("TOTV_STREAM_CORES", "/opt/cores"), "system")),
 		RWTmp:            env("TOTV_STREAM_RW_TMP", env("TOTV_STREAM_TMP", os.TempDir())),
 		PSPCoreOpts:      os.Getenv("TOTV_STREAM_PSP_CORE_OPTS"),
+		PS2BiosDir:       os.Getenv("TOTV_STREAM_PS2_BIOS_DIR"),
+		BigTmp:           os.Getenv("TOTV_STREAM_BIG_TMP"),
+		PS2CoreOpts:      os.Getenv("TOTV_STREAM_PS2_CORE_OPTS"),
+		PS2MaxISOMB:      envInt("TOTV_STREAM_PS2_MAX_ISO_MB", 0),
 		N64Aspect:        os.Getenv("TOTV_STREAM_N64_ASPECT"),
 		MaxSessions:      envInt("TOTV_STREAM_MAX_SESSIONS", 1),
 		W:                envInt("TOTV_STREAM_WIDTH", 640),
@@ -182,7 +188,15 @@ func main() {
 	if err := cfg.checkRWTmp(); err != nil {
 		log.Printf("WARNING: PSP sessions will be refused: %v", err)
 	}
-	for _, d := range []string{cfg.TmpRoot, cfg.RWTmp} {
+	if srv.ps2Present() {
+		if r := ps2BiosScan(cfg.PS2BiosDir); !r.OK {
+			log.Printf("WARNING: PS2 sessions will be refused (%s): TOTV_STREAM_PS2_BIOS_DIR=%q holds no valid PS2 BIOS (the component never ships one)", r.Reason, cfg.PS2BiosDir)
+		}
+		if w := cfg.checkBigTmp(); w != "" {
+			log.Printf("WARNING: %s", w)
+		}
+	}
+	for _, d := range []string{cfg.TmpRoot, cfg.RWTmp, cfg.bigTmp()} {
 		if n := cleanOrphans(d); n > 0 {
 			log.Printf("removed %d session directories left in %s by a previous run", n, d)
 		}

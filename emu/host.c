@@ -14,7 +14,7 @@
  *       'S' save RAM
  *       'T' stage timing, 12 x float32 every 120 frames: avg core, blit, readback, convert, total; max of the same five; GPU span; 0
  *       'E' error text, 'X' bye
- *   usage: retro-emu <core.so> <rom> <sram|-> <system_dir> <out_w> <out_h> [opts]   (opts: "k=v;k=v", see main(): fsize=<bytes> (RLIMIT_FSIZE, default 512 MiB), save=/dir (the one writable dir), ro=/dir (extra read-only dir), gl=core46|core33|gl33,
+ *   usage: retro-emu <core.so> <rom> <sram|-> <system_dir> <out_w> <out_h> [opts]   (opts: "k=v;k=v", see main(): shmmb=<MiB> (private /dev/shm size, default 512), fsize=<bytes> (RLIMIT_FSIZE, default 512 MiB), save=/dir (the one writable dir), ro=/dir (extra read-only dir), gl=core46|core33|gl33,
  *          dev=/dev/<node> (Landlock exception), rb=sync|pbo, filter=nearest|linear, v.<core option>=<value>)
  *          retro-emu --selftest | --gltest
  * Order matters: the ROM and the save are read into memory and the core is dlopen()ed FIRST (no core code runs yet);
@@ -263,7 +263,7 @@ static int sandbox_seccomp(void) {
 /* New user + network namespace (empty: not even loopback is up), then every capability is dropped. Must run while
  * the process is still single-threaded, i.e. before the core is loaded. Best effort: returns FLAG_NETNS or 0
  * (kernel/container without unprivileged user namespaces; the parent then reports netns=false). */
-static int want_shm, shm_ok; /* option shm=1: private /dev/shm (see the README, "PSP": why the core needs it) */
+static int want_shm, shm_ok, shm_mb = 512; /* option shmmb=N: size of the private /dev/shm (PSP 512, PCSX2 1024) */ /* option shm=1: private /dev/shm (see the README, "PSP": why the core needs it) */
 static int sandbox_netns(void) {
     char before[64] = "", after[64] = "";
     ssize_t b = readlink("/proc/self/ns/net", before, sizeof(before) - 1);
@@ -287,8 +287,9 @@ static int sandbox_netns(void) {
         fd = open("/proc/self/uid_map", O_WRONLY); if (fd >= 0) { int n = snprintf(m, sizeof m, "%u %u 1", u, u); if (write(fd, m, (size_t)n) < 0) {} close(fd); }
         fd = open("/proc/self/gid_map", O_WRONLY); if (fd >= 0) { int n = snprintf(m, sizeof m, "%u %u 1", g, g); if (write(fd, m, (size_t)n) < 0) {} close(fd); }
     }
+    char shm_opts[48]; snprintf(shm_opts, sizeof shm_opts, "size=%dm,mode=1777", shm_mb);
     if (want_shm) { /* our own mount namespace: nothing below propagates out; the tmpfs hides the host's /dev/shm from the core */
-        if (!mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) && !mount("totv-shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, "size=512m,mode=1777")) shm_ok = 1;
+        if (!mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) && !mount("totv-shm", "/dev/shm", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, shm_opts)) shm_ok = 1;
     }
     struct __user_cap_header_struct h = { .version = _LINUX_CAPABILITY_VERSION_3, .pid = 0 };
     struct __user_cap_data_struct d[2]; memset(d, 0, sizeof(d));
@@ -851,6 +852,7 @@ int main(int argc, char **argv) {
             else if (!strncmp(tok, "save=/", 6) && !savedir) { savedir = strdup(tok + 5); rw_dir[nrw_dir++] = savedir; }
             else if (!strncmp(tok, "fsize=", 6)) fsize = strtoull(tok + 6, NULL, 10);
             else if (!strcmp(tok, "shm=1")) { want_shm = 1; rw_dir[nrw_dir++] = "/dev/shm"; }
+            else if (!strncmp(tok, "shmmb=", 6)) { int v = atoi(tok + 6); if (v >= 16 && v <= 4096) shm_mb = v; }
             else if (!strncmp(tok, "ro=/", 4) && nro_extra < 3) ro_extra[nro_extra++] = strdup(tok + 3);
             else if (!strcmp(tok, "gfd=keep")) gpu_fd_keep = 1;
             else if (!strcmp(tok, "pidns=0")) no_pidns = 1;
@@ -907,7 +909,7 @@ int main(int argc, char **argv) {
     long rsz = 0; void *rom = NULL;
     if (si.need_fullpath) {
         struct stat st; if (stat(rompath, &st) || !S_ISREG(st.st_mode) || st.st_size <= 0) fail("rom open failed");
-        if (st.st_size > (4LL << 30)) fail("bad rom size");
+        if (st.st_size > (16LL << 30)) fail("bad rom size"); /* the component's own ceiling is lower (PS2 images: 9 GiB by default) */
         rsz = (long)st.st_size;
     } else {
         FILE *f = fopen(rompath, "rb"); if (!f) fail("rom open failed");

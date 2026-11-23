@@ -2,7 +2,7 @@
 
 Game streaming component for the Totv media server (a separate, currently private project; this repository stands on its own and
 documents the contract it speaks in [docs/CONTRACT.md](docs/CONTRACT.md)). It runs **one libretro core per
-session** (SNES, N64 or PSP), encodes the picture as H.264 Baseline (no B-frames) and the sound as Opus, sends both over
+session** (SNES, N64, PSP or, as a prototype, PS2), encodes the picture as H.264 Baseline (no B-frames) and the sound as Opus, sends both over
 WebRTC, and receives the controller over an unordered DataChannel.
 
 This project is **free of charge and maintained by its author** (GPL-3.0-or-later, see [LICENSE](LICENSE)). It is a
@@ -43,6 +43,7 @@ container, at pinned commits:
 
 ```
 scripts/fetch-cores.sh                                   # mupen64plus-next (N64) + PPSSPP (PSP), into ./cores
+scripts/fetch-cores.sh pcsx2                             # PS2 prototype (PCSX2 libretro core, GPL-3.0); needs a BIOS of YOUR console, see "PS2"
 scripts/fetch-cores.sh --i-accept-snes9x-noncommercial snes9x   # opt-in: the snes9x license is NON-COMMERCIAL
 ```
 
@@ -93,7 +94,7 @@ vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
 ## What is NOT proved
 
-- SNES, N64 and PSP were proved only on the author's machine (one Linux PC, one NVIDIA GPU). PS2 is not supported.
+- SNES, N64 and PSP were proved only on the author's machine (one Linux PC, one NVIDIA GPU). **PS2 is a prototype that has never run a game**: there is no PS2 BIOS or image of a game on the author's machine (what was and was not proved: [docs/DEVLOG.md](docs/DEVLOG.md), "PS2").
 - Docker with GPU, a microVM, and a published image: not done. The Docker image was built and run without GPU only.
 - Glass-to-glass latency on a real TV, Android WebRTC client interoperability, 30-minute stability, packet loss and
   bitrate adaptation: not measured. Only a pion client was used as the peer.

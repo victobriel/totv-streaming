@@ -66,6 +66,15 @@ func (c config) sessionMemMB() int {
 	return defaultSessionMemMB
 }
 
+// forCore is the configuration a session of core ci runs its cgroup with: a core with its own memory need (PCSX2) raises memory.max, never lowers an
+// operator's higher value.
+func (c config) forCore(ci coreInfo) config {
+	if ci.memMB > 0 && c.sessionMemMB() < ci.memMB {
+		c.SessionMemMB = ci.memMB
+	}
+	return c
+}
+
 // cgroupProps are the properties given to the scope (also what the probe and the verification expect to read back).
 func (c config) cgroupProps() []string {
 	return []string{"TasksMax=" + strconv.Itoa(c.sessionPids()), "MemoryMax=" + strconv.Itoa(c.sessionMemMB()) + "M", "MemorySwapMax=0", "OOMPolicy=kill"}

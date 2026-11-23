@@ -103,6 +103,8 @@ func retroMaskFor(platform string, buttons uint32) uint16 {
 		table = &padToRetroN64
 	case "psp":
 		table = &padToRetroPSP
+	case "ps2":
+		table = &padToRetroPS2
 	default:
 		return retroMask(buttons)
 	}
@@ -116,7 +118,9 @@ func retroMaskFor(platform string, buttons uint32) uint16 {
 }
 
 // hasAnalog: platforms whose core reads the analog stick(s) of the packet (the SNES has none).
-func hasAnalog(platform string) bool { return platform == "n64" || platform == "psp" }
+func hasAnalog(platform string) bool {
+	return platform == "n64" || platform == "psp" || platform == "ps2"
+}
 
 // PSP (PPSSPP libretro): RetroPad B = Cross, A = Circle, Y = Square, X = Triangle, L/R = L/R, Start/Select, D-pad (libretro.cpp of PPSSPP).
 // That is the SNES table (a = south = Cross, b = east = Circle, x = west = Square, y = north = Triangle: the PSP's face buttons have the same
@@ -129,3 +133,9 @@ var padToRetroPSP = [32]int{
 	8: 10, 9: 11, 10: 10, 11: 11, // l1/l2 -> L, r1/r2 -> R
 	12: -1, 13: -1, 14: 3, 15: 2, 16: -1,
 }
+
+// PS2 (PCSX2 libretro, pcsx2/PAD/PAD.c): the DualShock 2 maps one to one onto the RetroPad: B = Cross, A = Circle, Y = Square, X = Triangle, L/R = L1/R1,
+// L2/R2 = L2/R2, L3/R3, Start/Select, D-pad; the left stick is RETRO_DEVICE_INDEX_ANALOG_LEFT and the RIGHT stick RETRO_DEVICE_INDEX_ANALOG_RIGHT, so the
+// packet's four int8 axes (left X, left Y, right X, right Y) cover both sticks. The pressure of the face buttons (ANALOG_BUTTON) is answered 0 by the host: the
+// core then uses the digital bit as a full press (0xFF). This is the SNES table (padToRetro) on purpose: the same physical layout, nothing to translate.
+var padToRetroPS2 = padToRetro
