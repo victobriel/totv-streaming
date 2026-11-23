@@ -7,6 +7,8 @@
  *       kind 1 (input): a|b<<8 = 16-bit retropad mask, c = port (0..3)
  *       kind 2 (quit) : save RAM is sent, then the child exits
  *       kind 3 (axis) : a = port (0..3), b = axis (0 left X, 1 left Y, 2 right X, 3 right Y), c = int8 (x256 -> libretro int16)
+ *       kind 4 (aspect): a = mode 0 auto (the core's display aspect, bars) | 1 4:3 (bars at the sides) | 2 16:9 (stretch to the whole frame) | 3 fill (crop, keeps the core's aspect) | 4 pixel (integer scale, bars); b, c = 0.
+ *                        Changes how the picture is placed in the fixed output; the output size (and the encoder) never change. Any other value is ignored.
  *   child -> parent (protocol pipe, a private copy of fd 1), frames: [type u8][3 pad][len u32 LE][payload]
  *       'H' hello: f64 fps, f64 sample_rate, u32 w, u32 h, u32 sram_size, u32 sandbox_flags (16 = GPU context made before the sandbox, 32 = private /dev/shm in its own mount namespace)
  *       'V' video: I420 w*h*3/2 bytes (scaled, nearest or GPU-blitted, to the fixed output size)
@@ -15,7 +17,7 @@
  *       'T' stage timing, 12 x float32 every 120 frames: avg core, blit, readback, convert, total; max of the same five; GPU span; p95 of the per-frame total
  *       'E' error text, 'X' bye
  *   usage: retro-emu <core.so> <rom> <sram|-> <system_dir> <out_w> <out_h> [opts]   (opts: "k=v;k=v", see main(): shmmb=<MiB> (private /dev/shm size, default 512), fsize=<bytes> (RLIMIT_FSIZE, default 512 MiB), save=/dir (the one writable dir), ro=/dir (extra read-only dir), gl=core46|core33|gl33,
- *          dev=/dev/<node> (Landlock exception), rb=sync|pbo, filter=nearest|linear, v.<core option>=<value>)
+ *          dev=/dev/<node> (Landlock exception), rb=sync|pbo, filter=nearest|linear, aspect=auto|4:3|16:9|fill|pixel (initial mode), v.<core option>=<value>)
  *          retro-emu --selftest | --gltest
  * Order matters: the ROM and the save are read into memory and the core is dlopen()ed FIRST (no core code runs yet);
  * then the sandbox (user+net namespace, seccomp, Landlock) is applied; only after that retro_init/retro_load_game run,
@@ -56,6 +58,42 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include "libretro.h"
+
+/* How the core's picture is placed in the fixed output frame (kind 4 message / option aspect=). */
+enum { ASP_AUTO, ASP_43, ASP_169, ASP_FILL, ASP_PIXEL, ASP_N };
+static int sw_aspect;       /* current mode (software path); the GL path reads G.aspect_mode, both are set by set_aspect() */
+static float sw_dar;        /* display aspect the core reports (0 = unknown) */
+static volatile int aspect_dirty;
+/* d = destination rectangle {x0,y0,x1,y1} in the output, sr = source rectangle {x0,y0,x1,y1} of the core picture (a crop for "fill"), *nearest = 1 when the
+ * scale is an integer one (pixel mode) and the picture should not be smoothed. A difference under 3% from the output aspect fills it (a 480x272 PSP picture in 16:9). */
+static void aspect_rect(int mode, double dar, unsigned w, unsigned h, unsigned ow, unsigned oh, int d[4], int sr[4], int *nearest) {
+    double oar = (double)ow / (double)oh;
+    d[0] = 0; d[1] = 0; d[2] = (int)ow; d[3] = (int)oh; sr[0] = 0; sr[1] = 0; sr[2] = (int)w; sr[3] = (int)h; *nearest = 0;
+    if (!(dar > 0.3 && dar < 4.0)) dar = (double)w / (double)h;
+    if (mode == ASP_169) return;                       /* stretch to the whole frame */
+    if (mode == ASP_43) dar = 4.0 / 3.0;
+    if (mode == ASP_FILL) {                            /* cover the frame, centered crop of the picture shown at the core's aspect */
+        if (dar > oar * 1.001) { int sw = (int)((double)w * oar / dar + 0.5) & ~1; if (sw < 2) sw = 2; sr[0] = ((int)w - sw) / 2; sr[2] = sr[0] + sw; }
+        else if (dar < oar / 1.001) { int sh = (int)((double)h * dar / oar + 0.5) & ~1; if (sh < 2) sh = 2; sr[1] = ((int)h - sh) / 2; sr[3] = sr[1] + sh; }
+        return;
+    }
+    if (mode == ASP_PIXEL) {                           /* whole multiples of the core's picture (its aspect applied to the width), centered, black bars */
+        double bw = ((double)w / h - dar < 0.02 * dar && dar - (double)w / h < 0.02 * dar) ? (double)w : (double)h * dar, bh = (double)h;
+        int kx = (int)((double)ow / bw), ky = (int)((double)oh / bh), k = kx < ky ? kx : ky;
+        if (k >= 1) {
+            int ww = (int)(bw * k + 0.5) & ~1, hh = (int)(bh * k) & ~1;
+            d[0] = ((int)ow - ww) / 2 & ~1; d[2] = d[0] + ww; d[1] = ((int)oh - hh) / 2 & ~1; d[3] = d[1] + hh; *nearest = 1;
+            return;
+        }                                              /* does not fit even once: behave like auto */
+    }
+    if (dar > oar * 1.03) { int hh = (int)((double)ow / dar + 0.5) & ~1; d[1] = ((int)oh - hh) / 2 & ~1; d[3] = d[1] + hh; }
+    else if (dar < oar / 1.03) { int ww = (int)((double)oh * dar + 0.5) & ~1; d[0] = ((int)ow - ww) / 2 & ~1; d[2] = d[0] + ww; }
+}
+static int parse_aspect(const char *v) {
+    static const char *n[ASP_N] = { "auto", "4:3", "16:9", "fill", "pixel" };
+    for (int i = 0; i < ASP_N; i++) if (!strcmp(v, n[i])) return i;
+    return -1;
+}
 #ifdef HAVE_EGL
 #include "glhost.h"
 #endif
@@ -710,8 +748,9 @@ static bool env_cb(unsigned cmd, void *data) {
     case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE: *(bool *)data = false; return true;
     case RETRO_ENVIRONMENT_GET_LOG_INTERFACE: ((struct retro_log_callback *)data)->log = log_cb; return true;
     case RETRO_ENVIRONMENT_SET_GEOMETRY: case RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO: {
-#ifdef HAVE_EGL
         const struct retro_game_geometry *g = cmd == RETRO_ENVIRONMENT_SET_GEOMETRY ? data : &((const struct retro_system_av_info *)data)->geometry;
+        if (g) sw_dar = g->aspect_ratio;
+#ifdef HAVE_EGL
         if (g && g->aspect_ratio != G.dar) { G.dar = g->aspect_ratio; fprintf(stderr, "geometry: base %ux%u max %ux%u aspect %.4f\n", g->base_width, g->base_height, g->max_width, g->max_height, g->aspect_ratio); }
 #endif
         return true;
@@ -743,19 +782,28 @@ static void video_cb(const void *data, unsigned w, unsigned h, size_t pitch) {
         return;
     }
 #endif
-    static unsigned *xmap; static unsigned xmap_w;
-    if (xmap_w != w) { free(xmap); xmap = malloc(out_w * sizeof(unsigned)); for (unsigned x = 0; x < out_w; x++) xmap[x] = x * w / out_w; xmap_w = w; }
-    for (unsigned y = 0; y < out_h; y++) {
-        const unsigned char *row = (const unsigned char *)data + (size_t)(y * h / out_h) * pitch;
-        uint32_t *o = outbuf + (size_t)y * out_w;
-        if (pixfmt == RETRO_PIXEL_FORMAT_XRGB8888) { const uint32_t *s = (const uint32_t *)row; for (unsigned x = 0; x < out_w; x++) o[x] = s[xmap[x]]; }
+    /* software path: nearest-neighbour into the destination rectangle; "auto" keeps the picture stretched over the whole output (as before) */
+    static unsigned *xmap; static int xkey[6]; static int lastd[4] = { -1, -1, -1, -1 };
+    int d[4] = { 0, 0, (int)out_w, (int)out_h }, sr[4] = { 0, 0, (int)w, (int)h }, nn;
+    if (sw_aspect != ASP_AUTO) aspect_rect(sw_aspect, sw_dar, w, h, out_w, out_h, d, sr, &nn);
+    if (memcmp(d, lastd, sizeof d)) { memcpy(lastd, d, sizeof d); memset(outbuf, 0, (size_t)out_w * out_h * sizeof(uint32_t)); } /* a new rectangle: wipe the old bars */
+    int dw = d[2] - d[0], dh = d[3] - d[1], sw = sr[2] - sr[0], sh = sr[3] - sr[1];
+    int key[6] = { (int)w, d[0], d[2], sr[0], sr[2], 1 };
+    if (!xmap || memcmp(key, xkey, sizeof key)) {
+        free(xmap); xmap = malloc(out_w * sizeof(unsigned)); memcpy(xkey, key, sizeof key);
+        for (int x = 0; x < dw; x++) xmap[x] = (unsigned)(sr[0] + (long)x * sw / dw);
+    }
+    for (int y = 0; y < dh; y++) {
+        const unsigned char *row = (const unsigned char *)data + (size_t)(sr[1] + (long)y * sh / dh) * pitch;
+        uint32_t *o = outbuf + (size_t)(d[1] + y) * out_w + d[0];
+        if (pixfmt == RETRO_PIXEL_FORMAT_XRGB8888) { const uint32_t *s = (const uint32_t *)row; for (int x = 0; x < dw; x++) o[x] = s[xmap[x]]; }
         else if (pixfmt == RETRO_PIXEL_FORMAT_RGB565) {
             const uint16_t *s = (const uint16_t *)row;
-            for (unsigned x = 0; x < out_w; x++) { uint16_t p = s[xmap[x]]; uint32_t r = (p >> 11) & 31, g = (p >> 5) & 63, b = p & 31;
+            for (int x = 0; x < dw; x++) { uint16_t p = s[xmap[x]]; uint32_t r = (p >> 11) & 31, g = (p >> 5) & 63, b = p & 31;
                 o[x] = ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2); }
         } else {
             const uint16_t *s = (const uint16_t *)row;
-            for (unsigned x = 0; x < out_w; x++) { uint16_t p = s[xmap[x]]; uint32_t r = (p >> 10) & 31, g = (p >> 5) & 31, b = p & 31;
+            for (int x = 0; x < dw; x++) { uint16_t p = s[xmap[x]]; uint32_t r = (p >> 10) & 31, g = (p >> 5) & 31, b = p & 31;
                 o[x] = ((r << 3 | r >> 2) << 16) | ((g << 3 | g >> 2) << 8) | (b << 3 | b >> 2); }
         }
     }
@@ -798,6 +846,14 @@ static int16_t input_cb(unsigned port, unsigned dev, unsigned idx, unsigned id) 
     return id < 16 ? (pad[port] >> id) & 1 : 0;
 }
 
+static void set_aspect(int m) {
+    if (m < 0 || m >= ASP_N) return;
+    sw_aspect = m;
+#ifdef HAVE_EGL
+    G.aspect_mode = m;
+#endif
+    aspect_dirty = 1;
+}
 static unsigned char inbuf[256]; static size_t inlen; static int want_quit;
 /* drains the control pipe; returns -1 on EOF (parent gone) */
 static int drain_input(void) {
@@ -811,6 +867,7 @@ static int drain_input(void) {
         for (; i + 4 <= inlen; i += 4) {
             if (inbuf[i] == 1 && inbuf[i + 3] < 4) pad[inbuf[i + 3]] = inbuf[i + 1] | (inbuf[i + 2] << 8);
             else if (inbuf[i] == 3 && inbuf[i + 1] < 4 && inbuf[i + 2] < 4) axes[inbuf[i + 1]][inbuf[i + 2]] = (int8_t)inbuf[i + 3]; /* [3, port, axis, int8] */
+            else if (inbuf[i] == 4 && inbuf[i + 1] < ASP_N) set_aspect(inbuf[i + 1]); /* [4, mode, 0, 0] */
             else if (inbuf[i] == 2) want_quit = 1;
         }
         memmove(inbuf, inbuf + i, inlen - i); inlen -= i;
@@ -823,6 +880,13 @@ static void fail(const char *m) { send_msg('E', m, (uint32_t)strlen(m)); _exit(2
 static void add_ns(struct timespec *t, long ns) { t->tv_nsec += ns; while (t->tv_nsec >= 1000000000L) { t->tv_nsec -= 1000000000L; t->tv_sec++; } }
 
 int main(int argc, char **argv) {
+    if (argc == 8 && !strcmp(argv[1], "--recttest")) { /* --recttest <mode> <dar> <w> <h> <out_w> <out_h>: where aspect_rect() puts a picture (tests only; prints dst x0 y0 x1 y1, src x0 y0 x1 y1, nearest) */
+        int m = parse_aspect(argv[2]), d[4], sr[4], nn;
+        if (m < 0) return 64;
+        aspect_rect(m, atof(argv[3]), (unsigned)atoi(argv[4]), (unsigned)atoi(argv[5]), (unsigned)atoi(argv[6]), (unsigned)atoi(argv[7]), d, sr, &nn);
+        printf("%d %d %d %d %d %d %d %d %d\n", d[0], d[1], d[2], d[3], sr[0], sr[1], sr[2], sr[3], nn);
+        return 0;
+    }
     if (argc >= 2 && !strcmp(argv[1], "--selftest")) { no_ipc = argc > 2 && !strcmp(argv[2], "noipc"); return selftest(); }
     if (argc == 2 && !strcmp(argv[1], "--gltest")) { /* is there a usable GPU for HW_RENDER cores? (health: "gpu") */
 #ifdef HAVE_EGL
@@ -845,6 +909,7 @@ int main(int argc, char **argv) {
     dbg = getenv("RETRO_EMU_LOG") != NULL; /* debugging only: the parent starts the child with an empty environment */
     /* the driver must not write a shader cache nor start helper threads of its own after the sandbox */
     setenv("__GL_SHADER_DISK_CACHE", "0", 1); setenv("__GL_THREADED_OPTIMIZATIONS", "0", 1);
+    int init_aspect = ASP_AUTO;
     int rb_sync = 1, linear = 1, gpu_stats = 1; (void)gpu_stats;
     unsigned long long fsize = 512ULL << 20; /* option fsize=<bytes>: RLIMIT_FSIZE, the largest file the core can create or grow */
     if (argc == 8) { /* options "k=v;k=v": gl=core33|gl33|none, rb=sync (default)|pbo, filter=linear|nearest, v.<core option>=<value> */
@@ -866,8 +931,10 @@ int main(int argc, char **argv) {
             else if (!strcmp(tok, "rb=pbo")) rb_sync = 0;
             else if (!strcmp(tok, "rb=sync")) rb_sync = 1;
             else if (!strcmp(tok, "filter=nearest")) linear = 0;
+            else if (!strncmp(tok, "aspect=", 7) && parse_aspect(tok + 7) >= 0) init_aspect = parse_aspect(tok + 7);
         }
         free(o);
+        set_aspect(init_aspect); aspect_dirty = 0;
     }
     const char *corepath = argv[1], *rompath = argv[2], *sramp = argv[3]; sysdir = argv[4];
     out_w = (unsigned)atoi(argv[5]); out_h = (unsigned)atoi(argv[6]);
@@ -956,6 +1023,7 @@ int main(int argc, char **argv) {
     struct retro_game_info gi = { si.need_fullpath ? rompath : NULL, si.need_fullpath ? NULL : rom, (size_t)rsz, NULL };
     if (!r_load(&gi)) fail("game load failed");
     struct retro_system_av_info av; r_av(&av);
+    sw_dar = av.geometry.aspect_ratio;
 #ifdef HAVE_EGL
     G.dar = av.geometry.aspect_ratio;
     fprintf(stderr, "geometry: base %ux%u max %ux%u aspect %.4f fps %.3f output %ux%u\n", av.geometry.base_width, av.geometry.base_height, av.geometry.max_width, av.geometry.max_height, av.geometry.aspect_ratio, av.timing.fps, out_w, out_h);
@@ -988,6 +1056,13 @@ int main(int argc, char **argv) {
 #endif
         r_run();
         double run_ms = ms_since(&t0);
+#ifdef HAVE_EGL
+        /* the mode changed and the core drew nothing this frame (a still picture, a duplicated frame): place the last picture again */
+        if (aspect_dirty && hw_mode && !have_frame && frame_w && frame_h) {
+            double tb, tr; if (gl_frame_end(frame_w, frame_h, out_w, out_h, &tb, &tr)) have_frame = 2;
+        }
+#endif
+        aspect_dirty = 0;
         struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
         /* a duplicated frame (the core passes NULL: a 30 fps N64 game, FrameDuping) or one the PBO ring has not
          * delivered yet re-sends the last picture, so the stream stays at a steady 60 fps (an identical frame costs ~nothing in x264) */

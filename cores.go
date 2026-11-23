@@ -78,6 +78,7 @@ func qualityName(q string) string {
 // outProfile is everything a session's picture quality depends on: the fixed stream size, the cores' internal render scale, and the bitrate ceiling.
 type outProfile struct {
 	Quality string
+	Aspect  string // initial picture placement ("" = auto), see aspectNames
 	W, H    int
 	Kbps    int    // VBV ceiling of the x264 CRF encoder
 	N64x2   bool   // N64 at 640x480 internal (3x: N64Mult)
@@ -86,12 +87,14 @@ type outProfile struct {
 	PS2Mult string // pcsx2_upscale_multiplier
 }
 
-// defaultHighSize: 4:3 platforms at 960x720 (1.5x of the old 640x480 and a whole 3x of the N64's 320x240), the PSP at 960x544 (its 16:9 at 2x native).
+// defaultHighSize: the stream is a fixed 16:9 frame so that the picture can be re-placed live (aspect modes) without restarting the encoder: the 4:3
+// platforms (N64, PS2) at 1280x720, where "auto" shows them as a 960x720 pillarbox picture (1.5x of the old 640x480 and a whole 3x of the N64's 320x240),
+// the PSP at 960x544 (its 16:9 at 2x native).
 func defaultHighSize(platform string) (int, int) {
 	if platform == "psp" {
 		return 960, 544
 	}
-	return 960, 720
+	return 1280, 720
 }
 
 func parseSize(s string) (int, int, bool) {
@@ -102,7 +105,7 @@ func parseSize(s string) (int, int, bool) {
 	return w, h, true
 }
 
-// autoKbps is the VBV ceiling for a picture size: 9 Mbps at 960x720, proportional to the pixels, between 3 and 16 Mbps.
+// autoKbps is the VBV ceiling for a picture size: 9 Mbps at 960x720 (12 Mbps at 1280x720, under the 20 Mbps of level 3.2), proportional to the pixels, between 3 and 16 Mbps.
 func autoKbps(w, h int) int {
 	k := w * h * 9000 / (960 * 720)
 	if k < 3000 {
@@ -199,6 +202,9 @@ func (s *server) hostOptionsBIOS(name string, ci coreInfo, saveDir, assetsDir, b
 func (s *server) hostOptionsProfile(name string, ci coreInfo, saveDir, assetsDir, biosName string, pr outProfile) string {
 	var o []string
 	o = append(o, "fsize="+itoa64(s.cfg.fileMax()))
+	if aspectCode(pr.Aspect) > 0 {
+		o = append(o, "aspect="+pr.Aspect)
+	}
 	if ci.dirSave && okOptPath(saveDir) {
 		o = append(o, "save="+saveDir)
 	}

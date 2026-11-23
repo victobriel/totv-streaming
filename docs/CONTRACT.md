@@ -20,7 +20,8 @@ disagree, the code wins. The full list of environment variables and the operatio
 | `GET /v1/health` | `{version, encoder:"x264", gpu: null or {api,renderer,version}, cores:{snes:[..],n64:[..],psp:[..]}, isolation:{...}, limits:{...}}`. Core names are `server_<name>`; GPU cores are listed only when an EGL/GL context could be created at start. |
 | `GET /v1/sessions` | `[{id, state}, ...]` |
 | `POST /v1/sessions` | Creates a session (body below). `201 {"id"}`. |
-| `GET /v1/sessions/{id}` | `{state, playedMs, stats:{...}, quality, output, kbpsCeiling, fps, overBudget, suggestQuality}` (counters and latency percentiles; `quality` `high`/`safe`, `output` `WxH` of the stream, `kbpsCeiling` the VBV cap, `fps` the core's frame rate; `overBudget` true when the host's per-frame time p95 stayed above `TOTV_STREAM_HOSTMS_P95_X10`/10 ms (default 12) for 3 windows of 120 frames, and then `suggestQuality` is `"safe"`: the Totv can offer to restart the game lower). `404 not_found` if unknown. |
+| `GET /v1/sessions/{id}` | `{state, playedMs, stats:{...}, quality, aspect, output, kbpsCeiling, fps, overBudget, suggestQuality}` (counters and latency percentiles; `quality` `high`/`safe`, `aspect` the current picture placement (below), `output` `WxH` of the stream, `kbpsCeiling` the VBV cap, `fps` the core's frame rate; `overBudget` true when the host's per-frame time p95 stayed above `TOTV_STREAM_HOSTMS_P95_X10`/10 ms (default 12) for 3 windows of 120 frames, and then `suggestQuality` is `"safe"`: the Totv can offer to restart the game lower). `404 not_found` if unknown. |
+| `PATCH /v1/sessions/{id}` | Changes a live session. Body `{"aspect":"auto\|4:3\|16:9\|fill\|pixel"}` (and nothing else) -> `200 {"ok":true,"aspect":"<mode>"}`; `400 bad_request` for an unknown mode, a missing or extra field, an empty or non-JSON body; `404 not_found`; `401` like every route. See "Picture placement". |
 | `POST /v1/sessions/{id}/signal` | WebRTC signalling (below). |
 | `DELETE /v1/sessions/{id}` | Stops the session, stores the save, answers `200 {"ok":true,"saved":<bool>}`; `502 save_failed` if the save could not be stored. |
 
@@ -30,6 +31,7 @@ Create body (limit 16 KiB):
 { "sessionId": "[A-Za-z0-9_-]{1,64}", "itemId": <int > 0>, "mediaId": <int > 0>,
   "platform": "snes|n64|psp", "core": "server_<name>", "token": "<session token>",
   "serverUrl": "http://127.0.0.1:<port>[/prefix]", "iceHost": "<IPv4 the client can reach>",
+  "aspect": "auto|4:3|16:9|fill|pixel" /* optional, default "auto": the initial picture placement, see below */,
   "quality": "high|safe" /* optional; default TOTV_STREAM_QUALITY (high). "safe" = 640x480 (PSP 848x480), native render scale, 4 Mbps ceiling */ }
 ```
 
@@ -41,6 +43,23 @@ Session `state` values: `starting`, `waiting_signal`, `connecting`, `playing`, `
 There is no event stream: the host polls `GET /v1/sessions/{id}`. A session nobody signals is ended after
 `TOTV_STREAM_NOSIGNAL_SEC`; one whose peer is gone is ended after `TOTV_STREAM_DISCONNECT_SEC`; one whose core stops
 producing video is ended without saving (`TOTV_STREAM_NOVIDEO_SEC`).
+
+## Picture placement (`aspect`)
+
+The stream has a **fixed** size for the whole session (the encoder is never restarted): in `high`, N64 and PS2 are 1280x720 (16:9; before: 960x720), the PSP 960x544, SNES as configured; `safe` keeps 640x480 (PSP 848x480).
+`aspect` only says how the core's picture is placed in that frame, and can be changed live with `PATCH /v1/sessions/{id}` (the host's stdin message `kind 4`, `[4, mode, 0, 0]`, mode 0..4 in the order below;
+it takes effect on the next frame and clears the old bars):
+
+| mode | picture |
+|---|---|
+| `auto` (default) | the display aspect the core reports, centered with black bars (a 4:3 N64/PS2 picture is a 960x720 pillarbox inside 1280x720; a difference under 3% fills the frame) |
+| `4:3` | forced 4:3, bars at the sides (also for a core that reports another aspect) |
+| `16:9` | stretched over the whole frame (distorts a 4:3 picture) |
+| `fill` | covers the whole frame keeping the core's aspect: the excess (top and bottom of a 4:3 picture) is cropped, centered |
+| `pixel` | whole-number scale (1x, 2x, 3x...) with the core's aspect applied to the width, centered, black bars, nearest-neighbour; if not even 1x fits (PS2 at 2x renders 1280x896) it behaves like `auto` |
+
+The client does not need to know: the video track always has the same size. H.264 stays Constrained Baseline; the SDP announces the level of the real picture (`profile-level-id=42e020`, level 3.2, for 1280x720 at 50 or 60 fps; `level-asymmetry-allowed=1`).
+The bitrate ceiling follows the pixels (12 Mbps at 1280x720, 9 Mbps at 960x720, under the 20 Mbps of level 3.2).
 
 ## Signalling
 

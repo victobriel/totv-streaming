@@ -73,6 +73,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/sessions", s.list)
 	mux.HandleFunc("POST /v1/sessions", s.create)
 	mux.HandleFunc("GET /v1/sessions/{id}", s.status)
+	mux.HandleFunc("PATCH /v1/sessions/{id}", s.patch)
 	mux.HandleFunc("POST /v1/sessions/{id}/signal", s.signal)
 	mux.HandleFunc("DELETE /v1/sessions/{id}", s.remove)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -125,6 +126,7 @@ type createReq struct {
 	Token     string `json:"token"`
 	ServerURL string `json:"serverUrl"`
 	IceHost   string `json:"iceHost"`
+	Aspect    string `json:"aspect,omitempty"`  // "auto" (default) | "4:3" | "16:9" | "fill" | "pixel": how the picture is placed in the fixed 16:9 output (PATCH changes it live)
 	Quality   string `json:"quality,omitempty"` // "high" | "safe" ("" = the server default, TOTV_STREAM_QUALITY): "safe" is the way to lower a session that reports overBudget
 }
 
@@ -139,7 +141,7 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 	}
 	core := strings.TrimPrefix(q.Core, "server_")
 	ci, coreOK := s.coreAllowed(core)
-	if !idRe.MatchString(q.SessionID) || q.ItemID <= 0 || q.MediaID <= 0 || (coreOK && q.Platform != ci.platform) || !coreRe.MatchString(core) || (q.Quality != "" && q.Quality != "high" && q.Quality != "safe") {
+	if !idRe.MatchString(q.SessionID) || q.ItemID <= 0 || q.MediaID <= 0 || (coreOK && q.Platform != ci.platform) || !coreRe.MatchString(core) || (q.Quality != "" && q.Quality != "high" && q.Quality != "safe") || (q.Aspect != "" && aspectCode(q.Aspect) < 0) {
 		writeErr(w, 400, "bad_request")
 		return
 	}
@@ -225,6 +227,42 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, ss.Status())
+}
+
+// aspectNames are the picture placement modes, in the order of the host's ASP_* constants (emu/host.c); the index is the byte of the kind-4 message.
+var aspectNames = [...]string{"auto", "4:3", "16:9", "fill", "pixel"}
+
+// aspectCode is the host's code of a mode name, -1 when it is not one of them.
+func aspectCode(a string) int {
+	for i, n := range aspectNames {
+		if n == a {
+			return i
+		}
+	}
+	return -1
+}
+
+// patch changes a live session. Today only {"aspect": mode}: the host re-places the picture inside the fixed output (no restart, the encoder keeps its size).
+// Any other field, a second JSON value, an empty body or an unknown mode is a 400.
+func (s *server) patch(w http.ResponseWriter, r *http.Request) {
+	ss := s.get(r.PathValue("id"))
+	if ss == nil {
+		writeErr(w, 404, "not_found")
+		return
+	}
+	var m struct {
+		Aspect *string `json:"aspect"`
+	}
+	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<10))
+	dec.DisallowUnknownFields()
+	var extra json.RawMessage
+	if dec.Decode(&m) != nil || dec.Decode(&extra) != io.EOF || m.Aspect == nil || aspectCode(*m.Aspect) < 0 {
+		writeErr(w, 400, "bad_request")
+		return
+	}
+	ss.touch()
+	ss.setAspect(*m.Aspect)
+	writeJSON(w, 200, map[string]any{"ok": true, "aspect": *m.Aspect})
 }
 
 func (s *server) signal(w http.ResponseWriter, r *http.Request) {

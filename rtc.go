@@ -176,7 +176,7 @@ func (s *session) handleOffer(ctx context.Context, sdp string) (string, string) 
 	case <-ctx.Done():
 	}
 	s.setState("connecting")
-	return pc.LocalDescription().SDP, ""
+	return announceLevel(pc.LocalDescription().SDP, h264Level(s.prof.W, s.prof.H, s.encoderFPS())), ""
 }
 
 func (s *session) handleCandidate(raw json.RawMessage) string {

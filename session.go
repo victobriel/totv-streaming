@@ -82,6 +82,7 @@ type session struct {
 	helloCh    chan struct{}
 	helloOnce  sync.Once
 	hostMsV    atomic.Pointer[hostMs]
+	aspect     atomic.Value // current picture placement mode (aspectNames), changed live by PATCH /v1/sessions/{id}
 	prof       outProfile   // picture quality of this session: output size, bitrate ceiling, internal scale (cores.go)
 	overBudget atomic.Bool  // the host spent more than the per-frame budget (p95) for several windows in a row: the session should be lowered to "safe"
 	budgetRuns int          // consecutive 'T' windows over budget (readLoop only)
@@ -135,6 +136,8 @@ func newSession(s *server, q createReq, core, corePath string, tc *totvClient, i
 		inputToFrame: newRing(512), encodeMs: newRing(512), wireMs: newRing(512), inputWrite: newRing(512)}
 	ss.errMsg.Store("")
 	ss.prof = s.profile(coreTable[core], q.Quality)
+	ss.aspect.Store(firstNonEmpty(q.Aspect, "auto"))
+	ss.prof.Aspect = q.Aspect
 	return ss
 }
 
@@ -173,7 +176,7 @@ func (s *session) Status() map[string]any {
 			"msInputToFrame": s.inputToFrame.pct(), "msEncode": s.encodeMs.pct(), "msFrameToWire": s.wireMs.pct(), "msInputWrite": s.inputWrite.pct(),
 			"sandboxFlags": s.flags, "hostMs": s.hostMsV.Load(),
 		},
-		"quality": s.prof.Quality, "output": fmt.Sprintf("%dx%d", s.prof.W, s.prof.H), "kbpsCeiling": s.prof.Kbps, "fps": s.fpsNow(),
+		"quality": s.prof.Quality, "output": fmt.Sprintf("%dx%d", s.prof.W, s.prof.H), "aspect": s.aspectNow(), "kbpsCeiling": s.prof.Kbps, "fps": s.fpsNow(),
 		"overBudget": s.overBudget.Load(), "suggestQuality": s.suggestQuality(),
 	}
 }
@@ -597,6 +600,31 @@ func allZero(b []byte) bool {
 		}
 	}
 	return true
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
+// setAspect tells the host to place the picture differently: kind 4, [4, mode, 0, 0].
+func (s *session) setAspect(a string) {
+	c := aspectCode(a)
+	if c < 0 {
+		return
+	}
+	s.aspect.Store(a)
+	s.sendChild([4]byte{4, byte(c)})
+}
+
+func (s *session) aspectNow() string {
+	a, _ := s.aspect.Load().(string)
+	if a == "" {
+		return "auto"
+	}
+	return a
 }
 
 func (s *session) sendChild(m [4]byte) {

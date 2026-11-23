@@ -62,6 +62,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"unsafe"
 )
 
@@ -115,6 +116,14 @@ func h264Level(w, h int, fps float64) int {
 // receiver decode a level different from the one it offered (the level part of profile-level-id is not matched by the negotiation).
 func h264FmtpFor(level int) string {
 	return fmt.Sprintf("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e0%02x", level)
+}
+
+var fmtpLevelRe = regexp.MustCompile(`(?m)^(a=fmtp:\d+ [^\r\n]*profile-level-id=42e0)[0-9a-fA-F]{2}`)
+
+// announceLevel sets the level of the answer's Constrained Baseline H.264 line to the real one: pion answers with the level the browser OFFERED (Chrome offers 3.1,
+// 42e01f), which is below what a 1280x720 stream at 50/60 fps needs (3.2). With level-asymmetry-allowed=1 on both sides the receiver may decode another level.
+func announceLevel(sdp string, level int) string {
+	return fmtpLevelRe.ReplaceAllString(sdp, fmt.Sprintf("${1}%02x", level))
 }
 
 func newVideoEncoder(p encoderParams) (*videoEncoder, error) {

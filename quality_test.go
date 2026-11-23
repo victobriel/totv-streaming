@@ -39,9 +39,9 @@ func TestProfileHigh(t *testing.T) {
 			t.Errorf("%s: %+v (want %dx%d %d %q)", name, p, w, h, kbps, opt)
 		}
 	}
-	check("mupen64plus_next", 960, 720, 9000, "640x480")
+	check("mupen64plus_next", 1280, 720, 12000, "640x480")
 	check("ppsspp", 960, 544, 6800, "960x544")
-	check("pcsx2", 960, 720, 9000, "2x")
+	check("pcsx2", 1280, 720, 12000, "2x")
 	check("snes9x", 640, 480, 4000, "") // software core: not touched
 	// a session can ask for the safe profile, whatever the server default is
 	if p := s.profile(coreTable["mupen64plus_next"], "safe"); p.W != 640 || p.N64Opt != "320x240" || p.Kbps != 4000 {
@@ -53,7 +53,7 @@ func TestProfileHigh(t *testing.T) {
 		t.Errorf("ps2 size: %+v", p)
 	}
 	s.cfg.PS2Size = "1281x960" // odd width: refused, default kept
-	if p := s.profile(coreTable["pcsx2"], ""); p.W != 960 {
+	if p := s.profile(coreTable["pcsx2"], ""); p.W != 1280 || p.H != 720 {
 		t.Errorf("odd size accepted: %+v", p)
 	}
 	s.cfg.SizeSet, s.cfg.Kbps, s.cfg.N64Res = true, 5000, "native"
@@ -94,6 +94,17 @@ func TestH264LevelAndFmtp(t *testing.T) {
 	}
 	if h264FmtpFor(31) != h264Fmtp {
 		t.Errorf("level 3.1 must equal the old constant: %s", h264FmtpFor(31))
+	}
+}
+
+func TestAnnounceLevel(t *testing.T) {
+	in := "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 102\r\na=rtpmap:102 H264/90000\r\na=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\na=fmtp:111 minptime=10;useinbandfec=1\r\n"
+	got := announceLevel(in, 32)
+	if !strings.Contains(got, "profile-level-id=42e020\r\n") || strings.Contains(got, "42e01f") || !strings.Contains(got, "a=fmtp:111 minptime=10;useinbandfec=1\r\n") {
+		t.Errorf("answer: %q", got)
+	}
+	if o := "a=fmtp:97 packetization-mode=1;profile-level-id=640c1f\r\n"; announceLevel(o, 32) != o {
+		t.Error("a non-Baseline line was rewritten")
 	}
 }
 

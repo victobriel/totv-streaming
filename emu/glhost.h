@@ -32,6 +32,9 @@ static struct {
     double gpu_ms_sum; unsigned gpu_ms_n;
     float dar;                     /* display aspect ratio the core reports (0 = unknown: use the frame's w/h) */
     int rx0, ry0, rx1, ry1;        /* last destination rectangle inside the output (the rest is black bars) */
+    int sx0, sy0, sx1, sy1;        /* last source rectangle of the core picture (a crop in "fill" mode) */
+    int aspect_mode;               /* ASP_* (host.c): how the picture is placed in the output; changed at run time by the kind-4 message */
+    int last_mode;                 /* the mode the output was last drawn with (a change wipes the bars) */
 } G;
 
 static void *egl_lib;
@@ -262,21 +265,19 @@ static int gl_frame_end(unsigned w, unsigned h, unsigned ow, unsigned oh, double
         unsigned nz = 0, mx = 0; for (unsigned i = 0; i < w * h; i++) { if (big[4 * i] | big[4 * i + 1] | big[4 * i + 2]) nz++; if (big[4 * i] > mx) mx = big[4 * i]; }
         if (n++ % 60 == 0) fprintf(stderr, "gldebug: frame %d core_fbo nonblack px %u of %u, max R %u, glerr 0x%x w=%u h=%u\n", n, nz, w * h, mx, pglGetError(), w, h);
     }
-    /* destination rectangle: the picture keeps the display aspect the core reports (w/h when it reports none) inside the fixed output; a
-     * difference under 3% fills the frame (a 480x272 PSP picture in 16:9), otherwise letterbox / pillarbox with black bars, never a stretch */
-    int dx0 = 0, dy0 = 0, dx1 = (int)ow, dy1 = (int)oh;
-    {
-        double dar = G.dar > 0.3f && G.dar < 4.0f ? G.dar : (double)w / (double)h, oar = (double)ow / (double)oh;
-        if (dar > oar * 1.03) { int hh = (int)((double)ow / dar + 0.5) & ~1; dy0 = ((int)oh - hh) / 2 & ~1; dy1 = dy0 + hh; }
-        else if (dar < oar / 1.03) { int ww = (int)((double)oh * dar + 0.5) & ~1; dx0 = ((int)ow - ww) / 2 & ~1; dx1 = dx0 + ww; }
-    }
-    if (dx0 != G.rx0 || dy0 != G.ry0 || dx1 != G.rx1 || dy1 != G.ry1) { /* a new rectangle: wipe the bars of the old one */
-        G.rx0 = dx0; G.ry0 = dy0; G.rx1 = dx1; G.ry1 = dy1;
+    /* destination/source rectangles (aspect_rect in host.c): "auto" keeps the display aspect the core reports (w/h when it reports none) inside the fixed
+     * output (a difference under 3% fills the frame), "4:3" forces 4:3, "16:9" stretches to the whole frame, "fill" crops to cover it, "pixel" is an integer scale */
+    int d[4], sr[4], nn;
+    aspect_rect(G.aspect_mode, G.dar, w, h, ow, oh, d, sr, &nn);
+    int dx0 = d[0], dy0 = d[1], dx1 = d[2], dy1 = d[3];
+    if (G.aspect_mode != G.last_mode || dx0 != G.rx0 || dy0 != G.ry0 || dx1 != G.rx1 || dy1 != G.ry1) { /* a new rectangle or mode: wipe the bars of the old one */
+        G.last_mode = G.aspect_mode; G.rx0 = dx0; G.ry0 = dy0; G.rx1 = dx1; G.ry1 = dy1;
         pglClearColor(0, 0, 0, 1); pglClear(GL_COLOR_BUFFER_BIT);
     }
+    GLenum filt = (G.linear && !nn) ? GL_LINEAR : GL_NEAREST;
     /* bottom_left_origin: row 0 of the FBO is the bottom of the picture; pglReadPixels also starts at the bottom, so flip once here */
-    if (G.hw.bottom_left_origin) pglBlitFramebuffer(0, 0, (GLint)w, (GLint)h, dx0, dy1, dx1, dy0, GL_COLOR_BUFFER_BIT, G.linear ? GL_LINEAR : GL_NEAREST);
-    else pglBlitFramebuffer(0, 0, (GLint)w, (GLint)h, dx0, dy0, dx1, dy1, GL_COLOR_BUFFER_BIT, G.linear ? GL_LINEAR : GL_NEAREST);
+    if (G.hw.bottom_left_origin) pglBlitFramebuffer(sr[0], sr[1], sr[2], sr[3], dx0, dy1, dx1, dy0, GL_COLOR_BUFFER_BIT, filt);
+    else pglBlitFramebuffer(sr[0], sr[1], sr[2], sr[3], dx0, dy0, dx1, dy1, GL_COLOR_BUFFER_BIT, filt);
     pglEndQuery(GL_TIME_ELAPSED);
     pglBindFramebuffer(GL_READ_FRAMEBUFFER, G.out_fbo);
     pglReadBuffer(GL_COLOR_ATTACHMENT0);
