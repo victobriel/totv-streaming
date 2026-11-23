@@ -95,6 +95,7 @@ type session struct {
 	sramMu       sync.Mutex
 	sram         []byte
 	sramUploaded []byte
+	dirBase      []byte // directory-save cores: the package the session started from (nil: no save yet)
 
 	rtc rtcState
 
@@ -668,7 +669,11 @@ func (s *session) stop(save bool) (bool, error) {
 				if s.stopErr == nil {
 					s.stopErr = s.uploadSRAM(context.Background())
 				}
-				s.stopSaved = had && s.stopErr == nil
+				if s.ci.dirSave {
+					s.stopSaved = s.stopErr == nil && s.dirSaveSent()
+				} else {
+					s.stopSaved = had && s.stopErr == nil
+				}
 			}
 		}
 		s.teardown()
@@ -858,8 +863,21 @@ func (s *session) loadDirSave(ctx context.Context, tmp string) string {
 			return "save_load_failed"
 		}
 		s.sramUploaded = z
+		s.dirBase = z
 	}
 	return ""
+}
+
+// dirSaveSent: true only when the Totv accepted a package that is the session's final one and differs from the one the session started
+// from (a periodic upload counts). Nothing new to send (no savedata, or files unchanged) is false, and no empty zip is ever sent.
+func (s *session) dirSaveSent() bool {
+	s.upMu.Lock()
+	up := s.sramUploaded
+	s.upMu.Unlock()
+	s.sramMu.Lock()
+	cur := s.sram
+	s.sramMu.Unlock()
+	return len(up) > 0 && bytes.Equal(up, cur) && !bytes.Equal(up, s.dirBase)
 }
 
 // refreshDirSave packs the memory stick's savedata into s.sram (the buffer uploadSRAM compares and sends). With quiet > 0 the
