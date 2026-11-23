@@ -24,6 +24,8 @@ import (
 )
 
 const playoutURI = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay"
+
+// h264Fmtp is the SDP of the old fixed 640x480 stream (level 3.1); a session announces the level of its own picture (h264FmtpFor in codec.go).
 const h264Fmtp = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
 
 // playoutTrack is a video track that learns the negotiated id of the playout-delay extension.
@@ -54,11 +56,11 @@ type rtcState struct {
 	pk        rtp.Packetizer
 }
 
-func newAPI(mux ice.UDPMux, ip string) (*webrtc.API, error) {
+func newAPI(mux ice.UDPMux, ip, fmtp string) (*webrtc.API, error) {
 	m := &webrtc.MediaEngine{}
 	fb := []webrtc.RTCPFeedback{{Type: "nack"}, {Type: "nack", Parameter: "pli"}, {Type: "ccm", Parameter: "fir"}}
 	if err := m.RegisterCodec(webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{
-		MimeType: webrtc.MimeTypeH264, ClockRate: 90000, SDPFmtpLine: h264Fmtp, RTCPFeedback: fb}, PayloadType: 102}, webrtc.RTPCodecTypeVideo); err != nil {
+		MimeType: webrtc.MimeTypeH264, ClockRate: 90000, SDPFmtpLine: fmtp, RTCPFeedback: fb}, PayloadType: 102}, webrtc.RTPCodecTypeVideo); err != nil {
 		return nil, err
 	}
 	if err := m.RegisterCodec(webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{
@@ -95,7 +97,8 @@ func (s *session) handleOffer(ctx context.Context, sdp string) (string, string) 
 	}
 	mux := ice.NewUDPMuxDefault(ice.UDPMuxParams{UDPConn: conn})
 	r.conn, r.mux = conn, mux
-	api, err := newAPI(mux, s.iceIP)
+	fmtp := h264FmtpFor(h264Level(s.prof.W, s.prof.H, s.encoderFPS()))
+	api, err := newAPI(mux, s.iceIP, fmtp)
 	if err != nil {
 		return "", "internal"
 	}
@@ -106,7 +109,7 @@ func (s *session) handleOffer(ctx context.Context, sdp string) (string, string) 
 	r.pc = pc
 
 	r.vtrack = &playoutTrack{TrackLocalStaticRTP: nil, extID: &r.extID}
-	vt, err := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000, SDPFmtpLine: h264Fmtp}, "video", "totv")
+	vt, err := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000, SDPFmtpLine: fmtp}, "video", "totv")
 	if err != nil {
 		return "", "internal"
 	}
@@ -238,6 +241,14 @@ func (s *session) closeRTC() {
 	}
 }
 
+// encoderFPS is the frame rate x264 assumes: the core's own (50 for a PAL N64, 59.94 NTSC) once its hello arrived, 60 before.
+func (s *session) encoderFPS() float64 {
+	if f := s.fpsNow(); f >= 10 && f <= 144 {
+		return f
+	}
+	return 60
+}
+
 // videoLoop encodes the freshest frame (x264 baseline, no B-frames) and sends it with playout-delay 0/0.
 func (s *session) videoLoop() {
 	var enc *videoEncoder
@@ -264,8 +275,9 @@ func (s *session) videoLoop() {
 		}
 		if enc == nil {
 			var err error
-			ow, oh := s.srv.size(s.ci)
-			if enc, err = newVideoEncoder(ow, oh, 60, s.srv.cfg.Kbps, 60); err != nil {
+			c := s.srv.cfg
+			if enc, err = newVideoEncoder(encoderParams{W: s.prof.W, H: s.prof.H, FPS: s.encoderFPS(), CRF: c.CRF, MaxKbps: s.prof.Kbps, BufFrames: 6,
+				Threads: c.X264Threads, Preset: c.X264Preset}); err != nil {
 				log.Printf("session %s: encoder: %v", s.id, err)
 				return
 			}

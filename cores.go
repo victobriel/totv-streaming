@@ -62,12 +62,118 @@ const ps2SessionMemMB = 4096
 // maxPSPROM: a UMD holds 1.8 GB at most (dual layer), a CSO/PBP is smaller.
 const maxPSPROM = 2 << 30
 
-// size is the stream size for a core: its own (PSP 16:9) or the global one.
+// size is the stream size for a core under the server's default quality (see profile).
 func (s *server) size(ci coreInfo) (int, int) {
-	if ci.outW > 0 && ci.outH > 0 {
-		return ci.outW, ci.outH
+	p := s.profile(ci, "")
+	return p.W, p.H
+}
+
+func qualityName(q string) string {
+	if q == "high" {
+		return "high"
 	}
-	return s.cfg.W, s.cfg.H
+	return "safe"
+}
+
+// outProfile is everything a session's picture quality depends on: the fixed stream size, the cores' internal render scale, and the bitrate ceiling.
+type outProfile struct {
+	Quality string
+	W, H    int
+	Kbps    int    // VBV ceiling of the x264 CRF encoder
+	N64x2   bool   // N64 at 640x480 internal (3x: N64Mult)
+	N64Opt  string // mupen64plus-43screensize
+	PSPRes  string // ppsspp_internal_resolution
+	PS2Mult string // pcsx2_upscale_multiplier
+}
+
+// defaultHighSize: 4:3 platforms at 960x720 (1.5x of the old 640x480 and a whole 3x of the N64's 320x240), the PSP at 960x544 (its 16:9 at 2x native).
+func defaultHighSize(platform string) (int, int) {
+	if platform == "psp" {
+		return 960, 544
+	}
+	return 960, 720
+}
+
+func parseSize(s string) (int, int, bool) {
+	var w, h int
+	if n, err := fmt.Sscanf(strings.TrimSpace(s), "%dx%d", &w, &h); err != nil || n != 2 || w < 160 || h < 120 || w > 1920 || h > 1088 || w%2 != 0 || h%2 != 0 {
+		return 0, 0, false
+	}
+	return w, h, true
+}
+
+// autoKbps is the VBV ceiling for a picture size: 9 Mbps at 960x720, proportional to the pixels, between 3 and 16 Mbps.
+func autoKbps(w, h int) int {
+	k := w * h * 9000 / (960 * 720)
+	if k < 3000 {
+		k = 3000
+	}
+	if k > 16000 {
+		k = 16000
+	}
+	return k
+}
+
+// profile resolves the quality of a session ("high", "safe" or "" = the server default). "safe" is the previous behaviour: 640x480 (PSP 848x480), N64 at
+// its native 320x240 unless TOTV_STREAM_N64_RES=2x, 1x PSP/PS2, 4 Mbps ceiling. A zero config{} (tests) is "safe".
+func (s *server) profile(ci coreInfo, quality string) outProfile {
+	c := s.cfg
+	if quality == "" {
+		quality = c.Quality
+	}
+	p := outProfile{Quality: qualityName(quality), N64Opt: "320x240", PSPRes: "480x272", PS2Mult: "1x (Native)"}
+	if c.N64Internal2x {
+		p.N64Opt = "640x480"
+	}
+	if p.Quality != "high" {
+		p.W, p.H = c.W, c.H
+		if ci.outW > 0 && ci.outH > 0 {
+			p.W, p.H = ci.outW, ci.outH
+		}
+		p.Kbps = c.Kbps
+		if p.Kbps <= 0 {
+			p.Kbps = 4000
+		}
+		return p
+	}
+	// high
+	switch ci.platform {
+	case "n64":
+		p.N64Opt = map[string]string{"native": "320x240", "1x": "320x240", "3x": "960x720"}[c.N64Res]
+		if p.N64Opt == "" {
+			p.N64Opt = "640x480"
+		}
+	case "psp":
+		p.PSPRes = map[string]string{"1x": "480x272", "3x": "1440x816"}[c.PSPRes]
+		if p.PSPRes == "" {
+			p.PSPRes = "960x544"
+		}
+	case "ps2":
+		p.PS2Mult = map[string]string{"1x": "1x (Native)", "4x": "4x"}[c.PS2Res]
+		if p.PS2Mult == "" {
+			p.PS2Mult = "2x"
+		}
+	}
+	if ci.platform == "n64" || ci.platform == "psp" || ci.platform == "ps2" {
+		p.W, p.H = defaultHighSize(ci.platform)
+	} else {
+		p.W, p.H = c.W, c.H
+		if ci.outW > 0 && ci.outH > 0 {
+			p.W, p.H = ci.outW, ci.outH
+		}
+	}
+	if c.SizeSet && ci.platform != "snes" {
+		p.W, p.H = c.W, c.H
+	}
+	own := map[string]string{"n64": c.N64Size, "psp": c.PSPSize, "ps2": c.PS2Size}[ci.platform]
+	if w, h, ok := parseSize(own); ok {
+		p.W, p.H = w, h
+	}
+	p.Kbps = c.Kbps
+	if p.Kbps <= 0 {
+		p.Kbps = autoKbps(p.W, p.H)
+	}
+	return p
 }
 
 func (s *server) coreAllowed(name string) (coreInfo, bool) {
@@ -86,6 +192,11 @@ func (s *server) hostOptions(name string, ci coreInfo, saveDir, assetsDir string
 
 // hostOptionsBIOS is hostOptions plus the BIOS file name (inside <system>/pcsx2/bios) the PS2 core must use.
 func (s *server) hostOptionsBIOS(name string, ci coreInfo, saveDir, assetsDir, biosName string) string {
+	return s.hostOptionsProfile(name, ci, saveDir, assetsDir, biosName, s.profile(ci, ""))
+}
+
+// hostOptionsProfile is hostOptionsBIOS for one session's quality profile.
+func (s *server) hostOptionsProfile(name string, ci coreInfo, saveDir, assetsDir, biosName string, pr outProfile) string {
 	var o []string
 	o = append(o, "fsize="+itoa64(s.cfg.fileMax()))
 	if ci.dirSave && okOptPath(saveDir) {
@@ -113,18 +224,14 @@ func (s *server) hostOptionsBIOS(name string, ci coreInfo, saveDir, assetsDir, b
 		o = append(o, "rb=pbo")
 	}
 	if name == "ppsspp" {
-		o = append(o, pspCoreOptions(s.cfg.PSPCoreOpts)...)
+		o = append(o, pspCoreOptionsRes(s.cfg.PSPCoreOpts, pr.PSPRes)...)
 	}
 	if name == "pcsx2" {
-		o = append(o, ps2CoreOptions(s.cfg.PS2CoreOpts, biosName)...)
+		o = append(o, ps2CoreOptionsMult(s.cfg.PS2CoreOpts, biosName, pr.PS2Mult)...)
 	}
 	if name == "mupen64plus_next" {
-		res := "320x240"
-		if s.cfg.N64Internal2x {
-			res = "640x480"
-		}
 		o = append(o,
-			"v.mupen64plus-43screensize="+res,
+			"v.mupen64plus-43screensize="+pr.N64Opt,
 			"v.mupen64plus-alt-map=True", // independent C buttons (see input.go)
 			"v.mupen64plus-rdp-plugin=gliden64", "v.mupen64plus-rsp-plugin=hle", "v.mupen64plus-cpucore=dynamic_recompiler")
 		o = append(o, n64VideoOptions(s.cfg.N64Overscan, s.cfg.N64Aspect)...)
@@ -181,11 +288,11 @@ func n64VideoOptions(overscan, aspect string) []string {
 type hostMs struct {
 	Core, Blit, Readback, Convert, Total                float32
 	CoreMax, BlitMax, ReadbackMax, ConvertMax, TotalMax float32
-	GPU                                                 float32
+	GPU, TotalP95                                       float32 // GPU: glTimer span; TotalP95: p95 of the per-frame total in the 120-frame window
 }
 
 func (h hostMs) String() string {
-	return fmt.Sprintf("core %.2f blit %.2f readback %.2f convert %.2f total %.2f ms (max %.1f) gpu %.2f", h.Core, h.Blit, h.Readback, h.Convert, h.Total, h.TotalMax, h.GPU)
+	return fmt.Sprintf("core %.2f blit %.2f readback %.2f convert %.2f total %.2f ms (p95 %.1f, max %.1f) gpu %.2f", h.Core, h.Blit, h.Readback, h.Convert, h.Total, h.TotalP95, h.TotalMax, h.GPU)
 }
 
 // okOptPath: a directory handed to the host in the "k=v;k=v" option string must be absolute and free of the separators.
@@ -200,9 +307,12 @@ func okOptPath(p string) bool {
 // COMPATIBILITY context, which the host refuses on purpose. The in-core shader cache lives in <save dir>/PSP/SYSTEM/CACHE, i.e. in the
 // session's tmpfs directory, and the save package never contains it.
 // extra: TOTV_STREAM_PSP_CORE_OPTS="ppsspp_x=y;..." (only keys starting with ppsspp_).
-func pspCoreOptions(extra string) []string {
+func pspCoreOptions(extra string) []string { return pspCoreOptionsRes(extra, "480x272") }
+
+// pspCoreOptionsRes is pspCoreOptions at an internal resolution (480x272 native, 960x544 = 2x).
+func pspCoreOptionsRes(extra, res string) []string {
 	o := []string{
-		"v.ppsspp_internal_resolution=480x272",
+		"v.ppsspp_internal_resolution=" + res,
 		"v.ppsspp_cpu_core=JIT",
 		"v.ppsspp_frameskip=disabled",
 		"v.ppsspp_cache_iso=disabled",        // enabled would copy the whole ISO into RAM
@@ -230,9 +340,14 @@ func pspCoreOptions(extra string) []string {
 // validated by ps2BiosScan (a plain file name, no separator). extra: TOTV_STREAM_PS2_CORE_OPTS="pcsx2_x=y;..." (only keys starting with pcsx2_,
 // never pcsx2_bios: the BIOS is chosen by the component).
 func ps2CoreOptions(extra, biosName string) []string {
+	return ps2CoreOptionsMult(extra, biosName, "1x (Native)")
+}
+
+// ps2CoreOptionsMult is ps2CoreOptions at an upscale multiplier ("1x (Native)", "2x", "4x").
+func ps2CoreOptionsMult(extra, biosName, mult string) []string {
 	o := []string{
 		"v.pcsx2_renderer=OpenGL",
-		"v.pcsx2_upscale_multiplier=1x (Native)",
+		"v.pcsx2_upscale_multiplier=" + mult,
 		"v.pcsx2_analog_mode1=enabled",
 		"v.pcsx2_analog_mode2=enabled",
 		"v.pcsx2_shared_memory_cards=enabled", // one pair of cards per session, in <system>/pcsx2/memcards: that is the save

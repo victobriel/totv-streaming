@@ -72,6 +72,15 @@ dedicated unprivileged uid. All variables and the full API are described in [doc
 Real-core tests read ROMs from your own disk and are skipped without them (`SNES=1 SNES_ROM=...`, `N64=1 N64_ROM=...`,
 `PSP=1 PSP_ROM=...`; see [CONTRIBUTING.md](CONTRIBUTING.md)). ROMs are never part of the repository.
 
+## Picture quality
+
+Default profile `high` (`TOTV_STREAM_QUALITY=safe` or `"quality":"safe"` in a session's create request give the previous one): N64 renders at 640x480 and
+streams 960x720, PSP renders 960x544 and streams 960x544, PS2 renders at 2x and streams 960x720; x264 runs in constant-quality mode (CRF 22) with a
+bitrate ceiling that follows the picture size (9 Mbps at 960x720). Knobs: `TOTV_STREAM_{N64,PSP,PS2}_SIZE=WxH`, `TOTV_STREAM_WIDTH/HEIGHT` (all cores),
+`TOTV_STREAM_{N64,PSP,PS2}_RES`, `TOTV_STREAM_KBPS` (ceiling), `TOTV_STREAM_CRF`, `TOTV_STREAM_X264_THREADS`, `TOTV_STREAM_X264_PRESET`; the pictures keep the
+aspect the core reports (black bars, never a stretch). A session whose host time per frame stays above 12 ms (p95) says so in the log and in
+`GET /v1/sessions/{id}` (`overBudget`, `suggestQuality`). Numbers and what was not measured: [docs/DEVLOG.md](docs/DEVLOG.md), "Picture quality".
+
 ## Security and isolation (honest summary)
 
 Each session runs the core in a separate child process (`retro-emu`): ROM and save are read first, then all capabilities

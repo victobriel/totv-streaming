@@ -12,7 +12,7 @@
  *       'V' video: I420 w*h*3/2 bytes (scaled, nearest or GPU-blitted, to the fixed output size)
  *       'A' audio: s16le stereo at the core sample rate
  *       'S' save RAM
- *       'T' stage timing, 12 x float32 every 120 frames: avg core, blit, readback, convert, total; max of the same five; GPU span; 0
+ *       'T' stage timing, 12 x float32 every 120 frames: avg core, blit, readback, convert, total; max of the same five; GPU span; p95 of the per-frame total
  *       'E' error text, 'X' bye
  *   usage: retro-emu <core.so> <rom> <sram|-> <system_dir> <out_w> <out_h> [opts]   (opts: "k=v;k=v", see main(): shmmb=<MiB> (private /dev/shm size, default 512), fsize=<bytes> (RLIMIT_FSIZE, default 512 MiB), save=/dir (the one writable dir), ro=/dir (extra read-only dir), gl=core46|core33|gl33,
  *          dev=/dev/<node> (Landlock exception), rb=sync|pbo, filter=nearest|linear, v.<core option>=<value>)
@@ -709,7 +709,13 @@ static bool env_cb(unsigned cmd, void *data) {
     }
     case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE: *(bool *)data = false; return true;
     case RETRO_ENVIRONMENT_GET_LOG_INTERFACE: ((struct retro_log_callback *)data)->log = log_cb; return true;
-    case RETRO_ENVIRONMENT_SET_GEOMETRY: case RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO: return true;
+    case RETRO_ENVIRONMENT_SET_GEOMETRY: case RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO: {
+#ifdef HAVE_EGL
+        const struct retro_game_geometry *g = cmd == RETRO_ENVIRONMENT_SET_GEOMETRY ? data : &((const struct retro_system_av_info *)data)->geometry;
+        if (g && g->aspect_ratio != G.dar) { G.dar = g->aspect_ratio; fprintf(stderr, "geometry: base %ux%u max %ux%u aspect %.4f\n", g->base_width, g->base_height, g->max_width, g->max_height, g->aspect_ratio); }
+#endif
+        return true;
+    }
 #ifdef HAVE_EGL
     case RETRO_ENVIRONMENT_SET_HW_RENDER:
         if (!want_gl_type || !gl_hw_render(data)) { log_cb(3, "SET_HW_RENDER refused (core asked type %u v%u.%u)\n", ((struct retro_hw_render_callback *)data)->context_type, ((struct retro_hw_render_callback *)data)->version_major, ((struct retro_hw_render_callback *)data)->version_minor); return false; }
@@ -951,6 +957,8 @@ int main(int argc, char **argv) {
     if (!r_load(&gi)) fail("game load failed");
     struct retro_system_av_info av; r_av(&av);
 #ifdef HAVE_EGL
+    G.dar = av.geometry.aspect_ratio;
+    fprintf(stderr, "geometry: base %ux%u max %ux%u aspect %.4f fps %.3f output %ux%u\n", av.geometry.base_width, av.geometry.base_height, av.geometry.max_width, av.geometry.max_height, av.geometry.aspect_ratio, av.timing.fps, out_w, out_h);
     if (want_gl_type) {
         if (!hw_mode) fail("core did not ask for the GL context this session was set up for");
         const char *e = gl_make_targets(av.geometry.max_width, av.geometry.max_height, out_w, out_h);
@@ -988,9 +996,10 @@ int main(int argc, char **argv) {
         if (sent_one && send_msg('V', i420, out_w * out_h * 3 / 2)) return 1;
         double conv_ms = ms_since(&t1);
         /* per-stage timing for the parent: avg/max over 120 frames. core = retro_run minus (blit + readback) */
-        static double acc[5], mx[5]; static unsigned nacc;
+        static double acc[5], mx[5], tot[120]; static unsigned nacc;
         double v[5] = { run_ms - t_blit_ms - t_read_ms, t_blit_ms, t_read_ms, conv_ms, run_ms + conv_ms };
         for (int k = 0; k < 5; k++) { acc[k] += v[k]; if (v[k] > mx[k]) mx[k] = v[k]; }
+        tot[nacc % 120] = v[4];
         if (++nacc == 120) {
             float t[12]; for (int k = 0; k < 5; k++) { t[k] = (float)(acc[k] / nacc); t[5 + k] = (float)mx[k]; acc[k] = mx[k] = 0; }
 #ifdef HAVE_EGL
@@ -998,7 +1007,11 @@ int main(int argc, char **argv) {
 #else
             t[10] = 0;
 #endif
-            t[11] = 0; nacc = 0;
+            { /* p95 of the per-frame total of this window (insertion sort: 120 values, once every 2 s) */
+                for (int i = 1; i < 120; i++) { double x = tot[i]; int j = i - 1; while (j >= 0 && tot[j] > x) { tot[j + 1] = tot[j]; j--; } tot[j + 1] = x; }
+                t[11] = (float)tot[113];
+            }
+            nacc = 0;
             send_msg('T', t, sizeof t);
         }
         if (acount && send_msg('A', abuf, (uint32_t)(acount * 4))) return 1;

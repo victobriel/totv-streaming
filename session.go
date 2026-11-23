@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"math"
@@ -69,22 +70,26 @@ type session struct {
 	cleanExit    atomic.Bool // the child said 'X' (bye): a deliberate end, as opposed to a crash or a kill
 
 	// emulator child
-	cmd       *exec.Cmd
-	corePid   atomic.Int64 // the emulator itself (inside its PID namespace pid 1); cmd.Process is the supervisor in front of it
-	wmu       sync.Mutex
-	stdin     io.WriteCloser
-	stdout    io.ReadCloser
-	fps       float64
-	rate      float64
-	flags     uint32
-	helloCh   chan struct{}
-	helloOnce sync.Once
-	hostMsV   atomic.Pointer[hostMs]
-	sramSize  atomic.Int64 // expected save RAM size, from the hello (0 = the core has none)
-	upBusy    atomic.Bool  // at most one SRAM upload in flight
-	netns     bool
-	exited    chan struct{}
-	errMsg    atomic.Value // string sent by the child ('E')
+	cmd        *exec.Cmd
+	corePid    atomic.Int64 // the emulator itself (inside its PID namespace pid 1); cmd.Process is the supervisor in front of it
+	wmu        sync.Mutex
+	stdin      io.WriteCloser
+	stdout     io.ReadCloser
+	fps        float64
+	rate       float64
+	flags      uint32
+	helloCh    chan struct{}
+	helloOnce  sync.Once
+	hostMsV    atomic.Pointer[hostMs]
+	prof       outProfile   // picture quality of this session: output size, bitrate ceiling, internal scale (cores.go)
+	overBudget atomic.Bool  // the host spent more than the per-frame budget (p95) for several windows in a row: the session should be lowered to "safe"
+	budgetRuns int          // consecutive 'T' windows over budget (readLoop only)
+	budgetLog  time.Time    // last over-budget log line (at most one a minute)
+	sramSize   atomic.Int64 // expected save RAM size, from the hello (0 = the core has none)
+	upBusy     atomic.Bool  // at most one SRAM upload in flight
+	netns      bool
+	exited     chan struct{}
+	errMsg     atomic.Value // string sent by the child ('E')
 
 	upMu         sync.Mutex
 	sramMu       sync.Mutex
@@ -127,6 +132,7 @@ func newSession(s *server, q createReq, core, corePath string, tc *totvClient, i
 		frames:       make(chan frame, 2),
 		inputToFrame: newRing(512), encodeMs: newRing(512), wireMs: newRing(512), inputWrite: newRing(512)}
 	ss.errMsg.Store("")
+	ss.prof = s.profile(coreTable[core], q.Quality)
 	return ss
 }
 
@@ -165,6 +171,8 @@ func (s *session) Status() map[string]any {
 			"msInputToFrame": s.inputToFrame.pct(), "msEncode": s.encodeMs.pct(), "msFrameToWire": s.wireMs.pct(), "msInputWrite": s.inputWrite.pct(),
 			"sandboxFlags": s.flags, "hostMs": s.hostMsV.Load(),
 		},
+		"quality": s.prof.Quality, "output": fmt.Sprintf("%dx%d", s.prof.W, s.prof.H), "kbpsCeiling": s.prof.Kbps, "fps": s.fpsNow(),
+		"overBudget": s.overBudget.Load(), "suggestQuality": s.suggestQuality(),
 	}
 }
 
@@ -282,10 +290,10 @@ func (s *session) doStart(ctx context.Context) string {
 	if ci.saveSys {
 		sysdir = s.rwDir // PCSX2 keeps BIOS, memory cards and shader cache below <system>/pcsx2: the system directory IS the writable one
 	}
-	w, h := s.srv.size(ci)
+	w, h := s.prof.W, s.prof.H
 
 	args := []string{s.corePath, rom, srampath, sysdir, strconv.Itoa(w), strconv.Itoa(h)}
-	if o := s.srv.hostOptionsBIOS(s.core, ci, s.rwDir, s.srv.cfg.PSPSystemDir, bios.Name); o != "" {
+	if o := s.srv.hostOptionsProfile(s.core, ci, s.rwDir, s.srv.cfg.PSPSystemDir, bios.Name, s.prof); o != "" {
 		args = append(args, o)
 	}
 	cmd := exec.Command(s.srv.cfg.EmuBin, args...)
@@ -463,7 +471,7 @@ func (s *session) readLoop() {
 	br := bufio.NewReaderSize(s.stdout, 1<<16)
 	var hdr [8]byte
 	rs := newResampler()
-	ow, oh := s.srv.size(s.ci)
+	ow, oh := s.prof.W, s.prof.H
 	var vsize = ow * oh * 3 / 2
 	gotHello := false
 	for {
@@ -540,6 +548,7 @@ func (s *session) readLoop() {
 				var h hostMs
 				_ = binary.Read(bytes.NewReader(p), binary.LittleEndian, &h)
 				s.hostMsV.Store(&h)
+				s.checkBudget(&h)
 			}
 		case 'E':
 			s.errMsg.Store(string(p))
@@ -965,4 +974,53 @@ func (s *session) corePID() int {
 		return p
 	}
 	return s.cmd.Process.Pid
+}
+
+// fpsNow is the core's frame rate from its hello (0 before it).
+func (s *session) fpsNow() float64 {
+	select {
+	case <-s.helloCh:
+		return s.fps
+	default:
+		return 0
+	}
+}
+
+// suggestQuality: "safe" while the session is "high" and over its host budget, else "".
+func (s *session) suggestQuality() string {
+	if s.overBudget.Load() && s.prof.Quality == "high" {
+		return "safe"
+	}
+	return ""
+}
+
+// hostBudgetWindows is how many 2 s windows (120 frames) in a row must exceed the budget before the session reports it.
+const hostBudgetWindows = 3
+
+// checkBudget watches the host's per-frame time. A frame that takes more than the budget (default 12 ms at p95, of the 16.7 ms a 60 fps frame has) leaves
+// no room for a slow scene: the picture would start to drop frames. The component never lowers a running session by itself (the size of the stream
+// is fixed when the child starts); it records the fact in the log and in the session status (overBudget, suggestQuality) so that the Totv can offer to
+// restart the game with quality "safe". A window back under the budget clears it.
+func (s *session) checkBudget(h *hostMs) {
+	limit := s.srv.cfg.HostMsP95
+	if limit == 0 {
+		limit = 12
+	}
+	if limit < 0 {
+		return
+	}
+	if h.TotalP95 <= float32(limit) {
+		s.budgetRuns = 0
+		s.overBudget.Store(false)
+		return
+	}
+	s.budgetRuns++
+	if s.budgetRuns == hostBudgetWindows {
+		s.overBudget.Store(true)
+		if time.Since(s.budgetLog) < time.Minute {
+			return
+		}
+		s.budgetLog = time.Now()
+		log.Printf("session %s: host over budget at %dx%d (%s quality): frame total p95 %.1f ms > %.1f ms for %d windows (avg %.1f, max %.1f, core %.1f, gpu timer %.1f); restart with quality \"safe\" to lower the output", s.id, s.prof.W, s.prof.H, s.prof.Quality, h.TotalP95, limit, hostBudgetWindows, h.Total, h.TotalMax, h.Core, h.GPU)
+	}
 }

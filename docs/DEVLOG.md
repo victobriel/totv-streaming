@@ -20,7 +20,7 @@ measured**. **PS2 (PCSX2 libretro core) is a prototype on the branch `ps2`, no g
 | Piece | Choice | Why |
 |---|---|---|
 | Control, signaling, WebRTC | Go + [pion/webrtc v4](https://github.com/pion/webrtc) | Pure Go WebRTC with direct access to RTP packets and header extensions (needed for playout-delay 0/0), UDP mux on one fixed port, no C WebRTC build. Least effort for the control surface. |
-| H.264 | libx264 through cgo (`ultrafast` + `zerolatency`, Baseline, `bframes=0`, no lookahead, sliced threads) | One frame in, one access unit out, in-process: no pipe, no AU framing delay (an `ffmpeg` subprocess would add a hop and a frame of splitting delay). Measured ~1 ms per 640x480 frame. |
+| H.264 | libx264 through cgo (`superfast` + `zerolatency`, Baseline, CRF 22 under a VBV cap, `bframes=0`, no lookahead, 4 sliced threads; see "Picture quality") | One frame in, one access unit out, in-process: no pipe, no AU framing delay (an `ffmpeg` subprocess would add a hop and a frame of splitting delay). Measured ~1 ms per 640x480 frame at `ultrafast`, ~2 ms (p95 3 ms) per 960x720 frame at the current `superfast`. |
 | Opus | libopus through cgo (`RESTRICTED_LOWDELAY`, 20 ms) | Smallest delay Opus offers. Linear resampling from the core rate to 48 kHz (prototype quality). |
 | Emulator | `retro-emu`, a small C libretro host (`emu/host.c`), separate process | Single-threaded (Go's multi-threaded runtime is awkward for Landlock, which is per-thread). Order: ROM and save are read into memory, the core is `dlopen`ed (`RTLD_NOW`; its constructors run, no libretro function does), the sandbox is applied, and only then `retro_init`/`retro_load_game` run. Loads any `*_libretro.so`. Converts to I420 and scales (nearest) to 640x480 in C. |
 | Test core | `emu/testcore` (own libretro core, no ROM needed) | Gives tests a real core: moving square, 440 Hz tone, screen turns white + tone 880 Hz while RetroPad A is held (latency probe), 8 KiB save RAM whose first counter is incremented on each load (save test). |
@@ -60,7 +60,7 @@ Environment variables: `TOTV_STREAM_SOCK` (default `/run/totv-stream/control.soc
 `TOTV_STREAM_NOSIGNAL_SEC` (60), `TOTV_STREAM_DISCONNECT_SEC` (30),
 `TOTV_STREAM_DEV_TESTCORE=1` (also offers `server_testcore` and `server_glcore`, never in production),
 `TOTV_STREAM_GPU_DEVICES` (`/dev/nvidiactl`: device nodes a GPU core may still open after the sandbox, see "N64"),
-`TOTV_STREAM_READBACK` (`sync` default, `pbo`), `TOTV_STREAM_N64_RES` (`native` 320x240 default, `2x` = 640x480 internal),
+`TOTV_STREAM_READBACK` (`sync` default, `pbo`), `TOTV_STREAM_N64_RES` (`2x` = 640x480 internal is the default of the `high` profile, `native` = 320x240; see "Picture quality"),
 `TOTV_STREAM_PSP_SYSTEM` (`<cores>/system`: read-only directory that holds `PPSSPP/`, see "PSP"), `TOTV_STREAM_CHILD_LOG=<file>` (debug only: the child's stderr incl. the core's own log goes to this file, 0600; unset = /dev/null), `TOTV_STREAM_RW_TMP` (default `TOTV_STREAM_TMP`: where the
 core's writable directory is made, **must be a size-limited tmpfs**), `TOTV_STREAM_PSP_CORE_OPTS` (`ppsspp_x=y;...`),
 `TOTV_STREAM_ALLOW_NO_ISOLATION=1` (the component itself then accepts sessions without seccomp/landlock; development only).
@@ -608,6 +608,57 @@ What stays open for PS2 specifically: a JIT means a W+X mapping in the core's pr
 - Vulkan/paraLLEl-GS, the software renderers (not selected), upscaling above 1x, multitap/second pad, USB/DEV9/HDD (DEV9 logs `open r+: DEV9hdd.raw` at start, the file does not exist and nothing was created; the core has no network: sockets are denied), other GPUs, Mesa.
 - Whether the host's 640x480 stream size (NTSC 4:3 frame is 640x448, PAL 640x512; the host scales the whole frame) is right for 16:9 games: not examined.
 
+
+## Picture quality (branch `perf-qualidade`): resolution and CRF, measured before and after
+
+What changed (all of it can be overridden by environment, and a session can ask for the old picture with `"quality":"safe"`):
+
+| | before (= `safe`) | after (`high`, the default) |
+|---|---|---|
+| N64 | core 320x240 (`TOTV_STREAM_N64_RES=2x` for 640x480), stream 640x480 | core 640x480 (`2x`; `native` and `3x` = 960x720 selectable), stream **960x720** |
+| PSP | core 480x272, stream 848x480 | core 960x544 (`TOTV_STREAM_PSP_RES=1x\|2x\|3x`), stream **960x544** |
+| PS2 | core 1x, stream 640x480 | core `2x` (`TOTV_STREAM_PS2_RES=1x\|2x\|4x`), stream **960x720** (the core reports 1280x896, aspect 4:3) |
+| SNES | 640x480 | unchanged (software core, 256x224 upscaled) |
+| x264 | `ultrafast`, ABR 4000 kbps, VBV 3 frames, 60 fps always, x264's own thread count, level 3.1 | `superfast` (`TOTV_STREAM_X264_PRESET`), **CRF 22** (`TOTV_STREAM_CRF`), VBV ceiling = `TOTV_STREAM_KBPS` or by pixels (9000 kbps at 960x720, 6800 at 960x544, 3-16 Mbps), **VBV buffer 6 frames**, 4 explicit slice threads (`TOTV_STREAM_X264_THREADS`), **the core's real fps** (50 PAL N64, 59.94 as 60000/1001), IDR once a second, deblocking on, still Baseline + `zerolatency`, no B-frames |
+| SDP | `profile-level-id=42e01f` | `42e0` + the level of the picture: 3.2 (`20`) for 960x720 / 960x544 / 1280x720, 3.1 for 640x480, 4.2 for 1280x960; `level-asymmetry-allowed=1` stays. pion only matches the profile part of `profile-level-id`, so Chrome (headless, here) accepted `42e020` |
+
+Variables: `TOTV_STREAM_QUALITY` (`high` default, `safe`), `TOTV_STREAM_{N64,PSP,PS2}_SIZE=WxH` (even, 160x120..1920x1088), `TOTV_STREAM_WIDTH`+`HEIGHT` (both set: every GPU core, SNES excluded), `TOTV_STREAM_KBPS` (now the VBV ceiling; 0/unset = by size), `TOTV_STREAM_HOSTMS_P95_X10` (budget in tenths of ms, default 120 = 12 ms, negative = off). Core options given in `TOTV_STREAM_{N64,PSP,PS2}_CORE_OPTS` still win over the profile.
+`safe` is the old sizes, scales and 4 Mbps ceiling, but with the new x264 (CRF), so its picture is cheaper than the old ABR one (1.6 Mbps instead of 2.9 on the same N64 scene).
+
+**Aspect.** The host (`emu/glhost.h`) now blits the picture with the display aspect the core reports (`geometry.aspect_ratio`, updated by SET_GEOMETRY; the frame's own w/h when it reports none) into the fixed output: within 3% it fills the frame, otherwise black bars (the output FBO is cleared when the rectangle changes). Measured on this PC: N64 reports 640x480 / 1.3333, PSP 960x540 / 1.7778 (fills 960x544, 0.7% off), **PS2 NTSC reports 1280x896 / 1.3333**: its 640x448 frame is *meant* to be shown at 4:3 (non-square pixels), so filling 4:3 was already right and there was no stretch to fix; what the aspect code gives is the safety for a game that reports 16:9 or a different aspect. Forced `TOTV_STREAM_N64_SIZE=1280x720` shows the N64 picture as a centered 960x720 with black bars, not stretched.
+
+**Budget / safe mode.** The host now sends the p95 of the per-frame total (core + blit + readback + convert) of each 120-frame window (`hostMs.TotalP95`, the 12th float of message `T`, which was unused). If it stays above 12 ms for 3 windows in a row the session logs `host over budget ...` (at most once a minute) and reports `overBudget:true` and, for a `high` session, `suggestQuality:"safe"` in `GET /v1/sessions/{id}`; a window back under clears it. The component never changes a running session (the child's output size is fixed when it starts, and a mid-game restart would drop the game): the Totv can offer the user a restart with `"quality":"safe"`. It does not look at the GPU: the glTimer span (`hostMs.GPU`) includes the core's CPU time and was not a usable saturation signal here (1-3 ms on PS2, 19 ms on N64 in the first harness).
+
+### Measurements (harness `perf/run2.mjs`: isolated component on UDP 18590 + socket in /tmp, fake Totv serving the ROM, headless Chrome as the WebRTC client with a real `RTCPeerConnection`; 12 s of warm-up dropped; sampled every second; RTX 3060 at its idle clock (SM 210 MHz in `nvidia-smi`), 12 threads)
+
+Inputs: A/Start alternating (menus), then stick + A + X after `PLAYAT` s. N64 Banjo-Kazooie BR (PAL, 50 fps) 160 s: intros and cutscenes (a separate 75 s run with faster Start skipping reached the first scene, "gameplay" below); PSP Patapon 110 s: **never left the title menu** (Cross/Start mashed in a second run, no change); PS2 Crash of the Titans 120 s: reached the "Enter your name" screen, not gameplay. "before" = HEAD of `publicacao-limpa`, "after" = this branch (`superfast`, CRF 22).
+
+| run | stream | fps decoded | drops (browser/server) | kbps avg / p95 / max | avg QP | x264 ms p50/p95/max | hostMs total, window avg p50/p95 | per-frame p95 of a window (p50 / max) | CPU emu / component (of one core, avg) | GPU util avg/max |
+|---|---|---|---|---|---|---|---|---|---|---|
+| N64 before | 640x480 | 50.0 | 0 / 0 | 2754 / 3284 / 3386 | 12.3 | 1.2 / 1.6 / 2.2 | 5.1 / 6.2 | (not reported) | 25 / 33 | 7 / 16 % |
+| N64 after | 960x720 | 50.0 | 0 / 0 | 2403 / 3712 / 5112 | 15.1 | 2.0 / 3.2 / 5.5 | 6.7 / 7.4 | 9.7 / 11.2 | 32 / 41 | 10 / 19 % |
+| N64 "gameplay" before | 640x480 | 50.0 | 0 / 0 | 2935 / 3320 / 3354 | 17.2 | 1.1 / 1.7 / 3.1 | 5.4 / 6.0 | - | 26 / 32 | 7 / 13 % |
+| N64 "gameplay" after (veryfast) | 960x720 | 50.0 | 0 / 0 | 3030 / 4140 / 4382 | 20.9 | 3.2 / 6.0 / 11.2 | 6.2 / 6.8 | 9.2 / 10.0 | 30 / 55 | 9 / 15 % |
+| N64 "gameplay" after (superfast = default) | 960x720 | 50.0 | 0 / 0 | 3532 / 4768 / 5271 | 20.0 | 2.1 / 3.6 / 6.6 | 6.5 / 7.3 | 9.6 / 10.1 | 31 / 41 | 10 / 16 % |
+| N64 "gameplay" after (ultrafast) | 960x720 | 50.0 | 0 / 0 | 4450 / 6139 / 6893 | 20.7 | 1.8 / 2.8 / 4.7 | 6.8 / 7.4 | 9.7 / 10.3 | 32 / 35 | 10 / 16 % |
+| N64 "gameplay" `quality:"safe"` | 640x480 | 50.0 | 0 / 0 | 1593 / 2097 / 2366 | 21.3 | 2.5 / 4.5 / 6.7 | 5.3 / 5.7 | 7.4 / 8.6 | 25 / 43 | 7 / 13 % |
+| PSP before | 848x480 | 59.94 | 0 / 0 | 859 / 1058 / 2451 | 0.4 | 1.0 / 1.4 / 2.4 | 5.2 / 5.6 | - | 32 / 31 | 9 / 15 % |
+| PSP after | 960x544 | 59.94 | 0 / 0 | 149 / 232 / 1075 | 4.2 | 1.2 / 1.8 / 2.4 | 6.0 / 6.6 | 7.4 / 8.1 | 37 / 28 | 9 / 15 % |
+| PS2 before | 640x480 | 59.94 | 0 / 0 | 3397 / 3838 / 3967 | 15.3 | 0.7 / 1.0 / 1.4 | 7.4 / 9.7 | - | 68 / 24 | 11 / 14 % |
+| PS2 after | 960x720 | 59.94 | 0 / 0 | 4300 / 5743 / 8477 | 14.7 | 1.4 / 2.0 / 2.5 | 8.5 / 10.7 | 12.4 / 15.7 | 64 / 32 | 24 / 32 % |
+
+No frame was lost or dropped anywhere (`lost 0`, `nack 0`, `pli 0`, `freeze 0`; no single second ended more than 1.3 fps below the nominal rate). The PSP bitrate fell because CRF spends nothing on a static menu where ABR 4000 kept spending (QP 0.4 means it was over-spending); N64 fell for the same reason on the dark/low-detail scenes. Bursts are bounded by the VBV: the highest second was 8477 kbps (PS2) under the 9000 ceiling.
+**The 12 ms budget tripped on PS2 at 960x720** (per-frame p95 12.2-15.7 ms in some windows; 5 log lines in 120 s, `overBudget` false at the end): the 2x render makes the synchronous readback wait on the GPU (readback 4.1 ms against 1.95 ms at 1x; core 2.6, convert 2.0) while the frame time (16.7 ms) and the 59.94 fps held with 0 drops. So on this machine PS2 at 2x is at the edge of the margin the budget asks for, N64 and PSP are comfortably inside (p95 about 10 and 8 ms). `TOTV_STREAM_PS2_RES=1x` or `TOTV_STREAM_READBACK=pbo` are the knobs to try there; neither was measured here.
+**Preset.** Same N64 scene, same CRF: `ultrafast` 4.45 Mbps (x264 p95 2.8 ms), `superfast` 3.53 Mbps (3.6 ms), `veryfast` 3.03 Mbps (6.0 ms, max 11 ms on an IDR). `superfast` is the default: it saves 20% of the bits for ~1 ms of encode time; `veryfast` saves another 14% for another ~2 ms and the IDR spikes. These numbers include the encoder at 4 threads (it takes 0.2-0.5 of a core more than before).
+**Sharpness** (PNGs in `scratchpad/perf/out-*-v3/` after, `out-*-v1/` before; crops in `cmp-*.png`): PS2 "Enter your name" letters and the blue glyph outlines are crisp and the background texture is smooth, against softer, blockier edges before (the 2x core plus the 960x720 stream; the upscale from 640x480 was the blur); PSP title logo and menu text lose the stair-steps of the 480x272 core upscaled to 848x480; N64 polygon edges (Banjo's guitar, the scenery in the 1280x720 test) are clean at the 640x480 core resolution (looked at in the 1280x720 test frame and the new N64 frames; a pixel-exact before/after crop of the same N64 instant was not obtained, the cutscene timing differs between runs). The headless Chrome decodes in software (1.5 ms/frame at 960x720, 1.2 at 640x480).
+
+### Not measured (do not read more into these numbers)
+
+- **Glass-to-glass latency** (the loopback `make latency` tests were not rerun; encode + frame-to-wire grew by 1-2 ms at 960x720 and the Chrome decode by ~0.3 ms, a screen and a TV scaler were not in the loop).
+- **The Fire TV Stick** (AFTSS, ARMv7, ~900 MB RAM): 960x720 H.264 Baseline at level 3.2 and 50-60 fps was not decoded on it; the claim that it handles 720p/1080p@60 in hardware is from the device's specification, not measured. Its Wi-Fi under a 4-9 Mbps burst and the TV's own scaling of a 4:3 960x720 picture were not tried either. A real Chrome with hardware decoding was not used (headless Chrome here).
+- Gameplay of PSP and PS2 (menus only: the Patapon title menu did not react to Cross/Start, PS2 stopped at the name entry) and any scene of N64 beyond the Banjo intro and the first scene; bitrate and host time under a heavy PS2/PSP game are unknown (the PS2 budget trip suggests the heavy case will be above the idle one).
+- Sizes above 960x720 end to end (1280x960 / level 4.2 was only unit-tested for the SPS, never decoded; N64 at 1280x720 was run for the pillarbox check only), `TOTV_STREAM_N64_RES=3x`, PSP `3x`, PS2 `4x`, `READBACK=pbo` at the new sizes, two sessions at once, and the cgroup/`CPUQuota` limits with the higher CPU use.
+- `make test`'s real-core tests (`N64=1`, `PSP=1`, `PS2=1`) were not rerun; the harness above is what exercised the real cores.
 
 ## Docker
 

@@ -25,17 +25,26 @@ import (
 const version = "0.1.0-proto1"
 
 type config struct {
-	SockPath, SecretFile, CoresDir, EmuBin, TmpRoot  string
-	UDPPort                                          int
-	DevTestCore, AllowNoIsolation                    bool
-	GPUDevices                                       string // device nodes a HW_RENDER core may still open after the sandbox
-	ReadbackPBO, N64Internal2x                       bool
-	N64CoreOpts                                      string // extra mupen64plus core options "k=v;k=v" (experiments)
-	PS2BiosDir, BigTmp, PS2CoreOpts                  string // PS2: operator's BIOS directory (read by the parent, copied per session), disk directory for big images, extra core options
-	PS2MaxISOMB                                      int    // PS2 image ceiling in MiB (0 = 9 GiB)
-	PSPSystemDir, RWTmp, PSPCoreOpts                 string // PSP: read-only dir that holds PPSSPP/ (assets), writable tmpfs root for the memory stick, extra core options
-	N64Overscan, N64Aspect                           string // "l,r,t,b" crop in N64 320x240 pixels ("" = default, "off"); "" or "16:9" widescreen
-	MaxSessions, W, H, Kbps                          int
+	SockPath, SecretFile, CoresDir, EmuBin, TmpRoot string
+	UDPPort                                         int
+	DevTestCore, AllowNoIsolation                   bool
+	GPUDevices                                      string // device nodes a HW_RENDER core may still open after the sandbox
+	ReadbackPBO, N64Internal2x                      bool
+	N64CoreOpts                                     string // extra mupen64plus core options "k=v;k=v" (experiments)
+	PS2BiosDir, BigTmp, PS2CoreOpts                 string // PS2: operator's BIOS directory (read by the parent, copied per session), disk directory for big images, extra core options
+	PS2MaxISOMB                                     int    // PS2 image ceiling in MiB (0 = 9 GiB)
+	PSPSystemDir, RWTmp, PSPCoreOpts                string // PSP: read-only dir that holds PPSSPP/ (assets), writable tmpfs root for the memory stick, extra core options
+	N64Overscan, N64Aspect                          string // "l,r,t,b" crop in N64 320x240 pixels ("" = default, "off"); "" or "16:9" widescreen
+	MaxSessions, W, H, Kbps                         int
+	// Quality (TOTV_STREAM_QUALITY): "high" (the sharper defaults of profile() in cores.go) or "safe"/"" (the older 640x480, native-resolution, 4 Mbps
+	// profile). A session can ask for either in its create request.
+	Quality                                          string
+	SizeSet                                          bool   // TOTV_STREAM_WIDTH/HEIGHT were given: they override the per-platform "high" sizes
+	N64Size, PSPSize, PS2Size                        string // "WxH" output size of one platform ("" = default)
+	N64Res, PSPRes, PS2Res                           string // internal render scale of the "high" profile: N64 native|2x|3x, PSP 1x|2x|3x, PS2 1x|2x|4x ("" = 2x)
+	CRF, X264Threads                                 int    // x264 constant quality (0 = 22) and slices/threads (0 = 4)
+	X264Preset                                       string
+	HostMsP95                                        float64 // per-frame host time (ms, p95 of a 120-frame window) above which a session reports it is over budget (0 = 12, <0 = off)
 	NoSignalTimeout, DisconnectGrace, NoVideoTimeout time.Duration
 	DirSaveEvery                                     time.Duration // periodic upload of directory saves (0 = 30 s)
 	RWFiles                                          int           // most entries (inodes) in a session's writable directory (0 = 20000)
@@ -94,7 +103,19 @@ func loadConfig() config {
 		MaxSessions:      envInt("TOTV_STREAM_MAX_SESSIONS", 1),
 		W:                envInt("TOTV_STREAM_WIDTH", 640),
 		H:                envInt("TOTV_STREAM_HEIGHT", 480),
-		Kbps:             envInt("TOTV_STREAM_KBPS", 4000),
+		SizeSet:          os.Getenv("TOTV_STREAM_WIDTH") != "" && os.Getenv("TOTV_STREAM_HEIGHT") != "",
+		Kbps:             envInt("TOTV_STREAM_KBPS", 0), // 0 = by output size in "high" (9 Mbps at 960x720), 4000 in "safe"; a value is the VBV ceiling
+		Quality:          qualityName(env("TOTV_STREAM_QUALITY", "high")),
+		N64Size:          os.Getenv("TOTV_STREAM_N64_SIZE"),
+		PSPSize:          os.Getenv("TOTV_STREAM_PSP_SIZE"),
+		PS2Size:          os.Getenv("TOTV_STREAM_PS2_SIZE"),
+		N64Res:           os.Getenv("TOTV_STREAM_N64_RES"),
+		PSPRes:           os.Getenv("TOTV_STREAM_PSP_RES"),
+		PS2Res:           os.Getenv("TOTV_STREAM_PS2_RES"),
+		CRF:              envInt("TOTV_STREAM_CRF", 0),
+		X264Threads:      envInt("TOTV_STREAM_X264_THREADS", 0),
+		X264Preset:       os.Getenv("TOTV_STREAM_X264_PRESET"),
+		HostMsP95:        float64(envInt("TOTV_STREAM_HOSTMS_P95_X10", 120)) / 10,
 		NoSignalTimeout:  time.Duration(envInt("TOTV_STREAM_NOSIGNAL_SEC", 60)) * time.Second,
 		DisconnectGrace:  time.Duration(envInt("TOTV_STREAM_DISCONNECT_SEC", 30)) * time.Second,
 		NoVideoTimeout:   time.Duration(envInt("TOTV_STREAM_NOVIDEO_SEC", 5)) * time.Second,

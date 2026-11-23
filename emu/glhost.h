@@ -30,6 +30,8 @@ static struct {
     unsigned core_w, core_h; int pbo_i, pbo_primed; int q_i, q_n;
     unsigned char *ro;             /* last frame read back (BGRA, top row first) */
     double gpu_ms_sum; unsigned gpu_ms_n;
+    float dar;                     /* display aspect ratio the core reports (0 = unknown: use the frame's w/h) */
+    int rx0, ry0, rx1, ry1;        /* last destination rectangle inside the output (the rest is black bars) */
 } G;
 
 static void *egl_lib;
@@ -235,6 +237,8 @@ static const char *gl_make_targets(unsigned core_w, unsigned core_h, unsigned ow
     pglBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
     pglGenQueries(4, G.q);
     G.ro = calloc((size_t)ow * oh, 4);
+    pglBindFramebuffer(GL_FRAMEBUFFER, G.out_fbo);
+    pglClearColor(0, 0, 0, 1); pglClear(GL_COLOR_BUFFER_BIT);
     pglBindFramebuffer(GL_FRAMEBUFFER, G.core_fbo);
     pglClearColor(0, 0, 0, 1); pglClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
     return NULL;
@@ -258,9 +262,21 @@ static int gl_frame_end(unsigned w, unsigned h, unsigned ow, unsigned oh, double
         unsigned nz = 0, mx = 0; for (unsigned i = 0; i < w * h; i++) { if (big[4 * i] | big[4 * i + 1] | big[4 * i + 2]) nz++; if (big[4 * i] > mx) mx = big[4 * i]; }
         if (n++ % 60 == 0) fprintf(stderr, "gldebug: frame %d core_fbo nonblack px %u of %u, max R %u, glerr 0x%x w=%u h=%u\n", n, nz, w * h, mx, pglGetError(), w, h);
     }
+    /* destination rectangle: the picture keeps the display aspect the core reports (w/h when it reports none) inside the fixed output; a
+     * difference under 3% fills the frame (a 480x272 PSP picture in 16:9), otherwise letterbox / pillarbox with black bars, never a stretch */
+    int dx0 = 0, dy0 = 0, dx1 = (int)ow, dy1 = (int)oh;
+    {
+        double dar = G.dar > 0.3f && G.dar < 4.0f ? G.dar : (double)w / (double)h, oar = (double)ow / (double)oh;
+        if (dar > oar * 1.03) { int hh = (int)((double)ow / dar + 0.5) & ~1; dy0 = ((int)oh - hh) / 2 & ~1; dy1 = dy0 + hh; }
+        else if (dar < oar / 1.03) { int ww = (int)((double)oh * dar + 0.5) & ~1; dx0 = ((int)ow - ww) / 2 & ~1; dx1 = dx0 + ww; }
+    }
+    if (dx0 != G.rx0 || dy0 != G.ry0 || dx1 != G.rx1 || dy1 != G.ry1) { /* a new rectangle: wipe the bars of the old one */
+        G.rx0 = dx0; G.ry0 = dy0; G.rx1 = dx1; G.ry1 = dy1;
+        pglClearColor(0, 0, 0, 1); pglClear(GL_COLOR_BUFFER_BIT);
+    }
     /* bottom_left_origin: row 0 of the FBO is the bottom of the picture; pglReadPixels also starts at the bottom, so flip once here */
-    if (G.hw.bottom_left_origin) pglBlitFramebuffer(0, 0, (GLint)w, (GLint)h, 0, (GLint)oh, (GLint)ow, 0, GL_COLOR_BUFFER_BIT, G.linear ? GL_LINEAR : GL_NEAREST);
-    else pglBlitFramebuffer(0, 0, (GLint)w, (GLint)h, 0, 0, (GLint)ow, (GLint)oh, GL_COLOR_BUFFER_BIT, G.linear ? GL_LINEAR : GL_NEAREST);
+    if (G.hw.bottom_left_origin) pglBlitFramebuffer(0, 0, (GLint)w, (GLint)h, dx0, dy1, dx1, dy0, GL_COLOR_BUFFER_BIT, G.linear ? GL_LINEAR : GL_NEAREST);
+    else pglBlitFramebuffer(0, 0, (GLint)w, (GLint)h, dx0, dy0, dx1, dy1, GL_COLOR_BUFFER_BIT, G.linear ? GL_LINEAR : GL_NEAREST);
     pglEndQuery(GL_TIME_ELAPSED);
     pglBindFramebuffer(GL_READ_FRAMEBUFFER, G.out_fbo);
     pglReadBuffer(GL_COLOR_ATTACHMENT0);

@@ -20,7 +20,7 @@ disagree, the code wins. The full list of environment variables and the operatio
 | `GET /v1/health` | `{version, encoder:"x264", gpu: null or {api,renderer,version}, cores:{snes:[..],n64:[..],psp:[..]}, isolation:{...}, limits:{...}}`. Core names are `server_<name>`; GPU cores are listed only when an EGL/GL context could be created at start. |
 | `GET /v1/sessions` | `[{id, state}, ...]` |
 | `POST /v1/sessions` | Creates a session (body below). `201 {"id"}`. |
-| `GET /v1/sessions/{id}` | `{state, playedMs, stats:{...}}` (counters and latency percentiles). `404 not_found` if unknown. |
+| `GET /v1/sessions/{id}` | `{state, playedMs, stats:{...}, quality, output, kbpsCeiling, fps, overBudget, suggestQuality}` (counters and latency percentiles; `quality` `high`/`safe`, `output` `WxH` of the stream, `kbpsCeiling` the VBV cap, `fps` the core's frame rate; `overBudget` true when the host's per-frame time p95 stayed above `TOTV_STREAM_HOSTMS_P95_X10`/10 ms (default 12) for 3 windows of 120 frames, and then `suggestQuality` is `"safe"`: the Totv can offer to restart the game lower). `404 not_found` if unknown. |
 | `POST /v1/sessions/{id}/signal` | WebRTC signalling (below). |
 | `DELETE /v1/sessions/{id}` | Stops the session, stores the save, answers `200 {"ok":true,"saved":<bool>}`; `502 save_failed` if the save could not be stored. |
 
@@ -29,7 +29,8 @@ Create body (limit 16 KiB):
 ```
 { "sessionId": "[A-Za-z0-9_-]{1,64}", "itemId": <int > 0>, "mediaId": <int > 0>,
   "platform": "snes|n64|psp", "core": "server_<name>", "token": "<session token>",
-  "serverUrl": "http://127.0.0.1:<port>[/prefix]", "iceHost": "<IPv4 the client can reach>" }
+  "serverUrl": "http://127.0.0.1:<port>[/prefix]", "iceHost": "<IPv4 the client can reach>",
+  "quality": "high|safe" /* optional; default TOTV_STREAM_QUALITY (high). "safe" = 640x480 (PSP 848x480), native render scale, 4 Mbps ceiling */ }
 ```
 
 Errors: `400 bad_request` / `unknown_core`, `409 busy` (session limit, `TOTV_STREAM_MAX_SESSIONS`) / `exists`, `502`

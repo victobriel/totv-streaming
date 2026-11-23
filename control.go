@@ -125,6 +125,7 @@ type createReq struct {
 	Token     string `json:"token"`
 	ServerURL string `json:"serverUrl"`
 	IceHost   string `json:"iceHost"`
+	Quality   string `json:"quality,omitempty"` // "high" | "safe" ("" = the server default, TOTV_STREAM_QUALITY): "safe" is the way to lower a session that reports overBudget
 }
 
 var idRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -138,7 +139,7 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 	}
 	core := strings.TrimPrefix(q.Core, "server_")
 	ci, coreOK := s.coreAllowed(core)
-	if !idRe.MatchString(q.SessionID) || q.ItemID <= 0 || q.MediaID <= 0 || (coreOK && q.Platform != ci.platform) || !coreRe.MatchString(core) {
+	if !idRe.MatchString(q.SessionID) || q.ItemID <= 0 || q.MediaID <= 0 || (coreOK && q.Platform != ci.platform) || !coreRe.MatchString(core) || (q.Quality != "" && q.Quality != "high" && q.Quality != "safe") {
 		writeErr(w, 400, "bad_request")
 		return
 	}
