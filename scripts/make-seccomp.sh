@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 victobriel
+# The base profile comes from moby/profiles (Apache-2.0, Copyright the Moby/Docker authors); the added rules are GPL-3.0-or-later. See NOTICE.md.
 # Regenerates docker/seccomp-totv.json = Docker's default seccomp profile (moby/profiles, fetched, review before committing)
 # + exactly three extra rules the component's child needs to build its own namespaces (see README "Docker"):
 #   unshare(flags)  only with flags a subset of CLONE_NEWUSER|CLONE_NEWNET|CLONE_NEWNS|CLONE_NEWIPC (0x10000000|0x40000000|0x00020000|0x08000000)

@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 victobriel
 # Runs a command (default: bin/totv-streaming) inside ONE transient systemd user scope with a ceiling on threads, RAM and swap, with no root: the cgroup
 # is a child of the user's own delegated subtree (user@<uid>.service). The component also puts every SESSION in a scope of its own (TOTV_STREAM_CGROUP,
 # cgroup.go); this wrapper is the outer ring: it bounds the component plus all its sessions, and it is what the tests use to run hostile cores safely.

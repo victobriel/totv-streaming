@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 victobriel
+
 package main
 
 // GPU isolation, option 2: minimal descriptor surface, PID namespace, per-session cgroup.

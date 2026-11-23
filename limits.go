@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 victobriel
+
 package main
 
 // Per-session resource limits (hardening, round 2): free space checks before a download, the directory-size quota of the core's writable

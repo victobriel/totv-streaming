@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 victobriel
 # One-time setup of a DEDICATED unprivileged uid for totv-streaming (GPL-3.0-or-later). Needs root. Not run by anything in this repository.
 # See README.md, "GPU isolation (opção 2)": what a dedicated uid buys (a compromised core can no longer touch the Totv's processes, files, ssh keys,
 # browser profile or the desktop session: they belong to another uid) and what it does not (a kernel exploit through the GPU driver is root).

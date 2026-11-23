@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 victobriel */
 /* glcore: libretro core with HW_RENDER (OpenGL core 3.3) and NO ROM: proves the GPU path of the host
  * (EGL context -> core FBO -> blit -> PBO readback -> x264 -> WebRTC). GPL-3.0-or-later.
  * Draws a spinning triangle (red/green/blue corners) on a dark blue background; while RetroPad A is held the background

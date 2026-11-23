@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 victobriel */
 /* retro-emu: libretro host, child process of totv-streaming (GPL-3.0-or-later).
  *
  * Runs ONE core + ONE game. Talks to the parent only through stdin/stdout pipes:

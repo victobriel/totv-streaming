@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 victobriel
+
 package main
 
 // Per-session cgroup (GPU isolation, option 2). Each emulator child runs in its OWN transient systemd scope of the user manager

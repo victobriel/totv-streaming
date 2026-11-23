@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 victobriel */
 /* glhost.h: headless OpenGL for HW_RENDER libretro cores (N64 etc.), included by host.c. GPL-3.0-or-later.
  *
  * - libEGL is dlopen()ed (retro-emu still runs on a machine without EGL; only GPU cores need it).

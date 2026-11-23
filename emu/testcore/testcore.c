@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 victobriel */
 /* testcore: a tiny libretro core that needs NO ROM (any file works). GPL-3.0-or-later.
  * Draws a moving square and a frame counter bar, makes a 440 Hz tone, and:
  *  - while retropad A is held, the whole screen is white and the tone jumps to 880 Hz (latency probe);

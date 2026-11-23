@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 victobriel
+
 // totv-streaming: streaming component for Totv (SNES prototype). GPL-3.0-or-later.
 package main
 

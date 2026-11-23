@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 victobriel
+
 package main
 
 // Save packages for platforms whose save is a DIRECTORY (PSP: PSP/SAVEDATA/<GAMEID>/..., later PS2 memory cards): one .zip, as the

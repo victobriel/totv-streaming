@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 victobriel
+
 package main
 
 // Hardening, revision 3: the F_SETOWN/O_ASYNC kill of the parent, IPC namespace, no new processes, cgroup limits, inode quota, PDEATHSIG.

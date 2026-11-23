@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 victobriel
+
 package main
 
 // Hardening, round 2: per-session limits (space, quota, file size, tmpfs), the single-thread rule before the sandbox, no save after a crash,

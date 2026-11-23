@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 victobriel
 # Installs the PPSSPP system assets next to the cores: scripts/psp-assets.sh <ppsspp source tree> <system dir>
 # (<system dir> is TOTV_STREAM_PSP_SYSTEM, default <cores dir>/system; the core reads <system dir>/PPSSPP/..., mounted read-only in its sandbox).
 # Minimal set (1.8 MB, enough to boot and run a homebrew, an ISO and a CSO headless, measured): ppge_atlas.zim (the PSP's on-screen
