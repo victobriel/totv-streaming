@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 victobriel
 # Builds the libretro cores the component runs, INSIDE a throwaway Debian trixie container (the same Debian as the runtime image, so the
 # .so files link against the glibc/libstdc++/libGL they will really run with), and writes them to ./cores (or $CORES_DIR). Nothing is
 # built into the component image: you mount that directory read-only at /opt/cores.
@@ -8,8 +10,10 @@
 #   scripts/fetch-cores.sh --i-accept-snes9x-noncommercial snes9x     OPT-IN, see the licence note below
 #
 # Licences (check them yourself before distributing anything you build; this is not legal advice):
-#   mupen64plus_next  GPL-2.0 (GLideN64 and mupen64plus parts GPL-2.0-or-later)      compatible with this GPL-3.0-or-later component as a separate program
-#   ppsspp            GPL-2.0-or-later (hrydgard/ppsspp, libretro/ dir)               idem; needs NO PSP firmware/BIOS (high level emulation)
+#   mupen64plus_next  GPL-2.0 (GLideN64 and mupen64plus parts GPL-2.0-or-later): TO BE CONFIRMED at the pinned commit. The core is dlopen()ed INTO THE
+#                     SAME PROCESS as emu/host.c (GPL-3.0-or-later), not run as a separate program: a GPL-2.0-only core and this GPL-3.0-or-later
+#                     host cannot be DISTRIBUTED together (building and running them locally distributes nothing). See NOTICE.md.
+#   ppsspp            GPL-2.0-or-later (hrydgard/ppsspp, libretro/ dir): same dlopen note, but "or later" allows GPL-3.0; needs NO PSP firmware/BIOS
 #   snes9x            NON-COMMERCIAL licence (not free software, not GPL): it must never be put in an image or distributed; building it for your own
 #                     private use is your decision, hence the explicit flag. The default build does not touch it.
 # No ROM, firmware or BIOS is downloaded or needed. Pinned COMMIT SHAs (override with env, 40 hex digits only: a tag or branch moves): MUPEN_REF, PPSSPP_REF

@@ -1,0 +1,94 @@
+# Integration contract
+
+What a host program (the Totv media server, or any program that plays its role) must speak to drive this component. It is
+derived from the code (`control.go`, `session.go`, `input.go`, `savezip.go`, `totv.go`, `rtc.go`); where this text and the code
+disagree, the code wins. The full list of environment variables and the operational details are in [DEVLOG.md](DEVLOG.md).
+
+## Transport and authentication
+
+- The control API is plain HTTP over a **Unix socket** (`TOTV_STREAM_SOCK`). There is no TCP listener for it.
+- Every request needs `Authorization: Bearer <secret>`. The secret is the content of the file `TOTV_STREAM_SECRET_FILE`
+  (whitespace trimmed, re-read on every request, so it can be rotated without a restart). It is compared in constant time.
+  A missing or wrong secret gives `401 {"error":"unauthorized"}`. Keep the socket and the secret file readable only by the
+  host program's user.
+- Bodies are JSON. Errors are `{"error":"<code>"}`. Request and response bodies are never logged.
+
+## Routes
+
+| Route | Meaning |
+|---|---|
+| `GET /v1/health` | `{version, encoder:"x264", gpu: null or {api,renderer,version}, cores:{snes:[..],n64:[..],psp:[..]}, isolation:{...}, limits:{...}}`. Core names are `server_<name>`; GPU cores are listed only when an EGL/GL context could be created at start. |
+| `GET /v1/sessions` | `[{id, state}, ...]` |
+| `POST /v1/sessions` | Creates a session (body below). `201 {"id"}`. |
+| `GET /v1/sessions/{id}` | `{state, playedMs, stats:{...}}` (counters and latency percentiles). `404 not_found` if unknown. |
+| `POST /v1/sessions/{id}/signal` | WebRTC signalling (below). |
+| `DELETE /v1/sessions/{id}` | Stops the session, stores the save, answers `200 {"ok":true,"saved":<bool>}`; `502 save_failed` if the save could not be stored. |
+
+Create body (limit 16 KiB):
+
+```
+{ "sessionId": "[A-Za-z0-9_-]{1,64}", "itemId": <int > 0>, "mediaId": <int > 0>,
+  "platform": "snes|n64|psp", "core": "server_<name>", "token": "<session token>",
+  "serverUrl": "http://127.0.0.1:<port>[/prefix]", "iceHost": "<IPv4 the client can reach>" }
+```
+
+Errors: `400 bad_request` / `unknown_core`, `409 busy` (session limit, `TOTV_STREAM_MAX_SESSIONS`) / `exists`, `502`
+(`system_assets_missing`, download or start failures), `503 isolation_unavailable` (no seccomp/Landlock and no development
+override). `platform` must match the core.
+
+Session `state` values: `starting`, `waiting_signal`, `connecting`, `playing`, `disconnected`, `stopping`, `stopped`.
+There is no event stream: the host polls `GET /v1/sessions/{id}`. A session nobody signals is ended after
+`TOTV_STREAM_NOSIGNAL_SEC`; one whose peer is gone is ended after `TOTV_STREAM_DISCONNECT_SEC`; one whose core stops
+producing video is ended without saving (`TOTV_STREAM_NOVIDEO_SEC`).
+
+## Signalling
+
+`POST /v1/sessions/{id}/signal`, body limit 64 KiB (`413 too_large`):
+
+- `{"type":"offer","sdp":"..."}` gives `200 {"type":"answer","sdp":"..."}`. The answer already holds the only ICE candidate
+  (host candidate on `iceHost`, UDP port `TOTV_STREAM_UDP_PORT`, default 8422; no STUN, no TURN, no mDNS).
+- `{"candidate":{...}}` gives `200 {"ok":true}`; `{"candidate":null}` is accepted and ignored.
+- Anything else: `400 bad_request`.
+
+Media: H.264 Baseline without B-frames (x264) and Opus, both from the component to the client, with the playout-delay RTP
+header extension at 0/0 when negotiated.
+
+## Input
+
+The client opens a DataChannel labelled **`input`** (any other label is closed), unordered. Each message is one packet of
+exactly **12 bytes**, big-endian:
+
+| Byte | Field | Notes |
+|---|---|---|
+| 0 | version | must be 1 |
+| 1-2 | seq | uint16; a packet not strictly newer than the last accepted (16-bit wrap-around, `int16(seq-last) > 0`) is dropped |
+| 3-6 | buttons | uint32 bitmask: bit 0 dpad_up, 1 dpad_down, 2 dpad_left, 3 dpad_right, 4 a, 5 b, 6 x, 7 y, 8 l1, 9 r1, 10 l2, 11 r2, 12 l3, 13 r3, 14 start, 15 select, 16 guide (ignored); 17-31 must be 0 |
+| 7-10 | axes | 4 x int8: left X, left Y, right X, right Y (used by N64 and PSP) |
+| 11 | port | 0..3 |
+
+`a/b/x/y` are physical positions of an Xbox-style pad (a south, b east, x west, y north). Packets of another length or
+version, or with `port > 3`, are dropped and counted (`inputBad`, `inputOldDropped` in the status). Clients are expected to
+resend the current state every ~16 ms.
+
+## ROM and saves (what the component asks of the host)
+
+The component talks back to the host program at `serverUrl` (loopback), with `Authorization: Bearer <token>` (the session
+token from the create body; it never reaches the emulator process):
+
+- `GET /api/games/rom/{mediaId}` downloads the ROM (limit 64 MiB; larger for PSP discs). `404` ends the start.
+- `GET /api/games/{itemId}/sram` downloads the save (`404` = no save yet; any other error stops the start rather than begin
+  from an empty save).
+- `PUT /api/games/{itemId}/sram?core=server_<name>&mediaId=<id>` uploads the save (`application/octet-stream`), when the
+  session ends and, for PSP, periodically while playing.
+
+SNES and N64 saves are the raw SRAM image (limit 2 MiB on download). A PSP save is a **directory**, exchanged as one **zip**
+(up to 64 MiB packed, 256 MiB unpacked, 4096 entries): classic zip (no ZIP64), methods stored or deflate, no encryption,
+names relative with `/` only, all below `PSP/SAVEDATA/`, no `..`, no absolute path, no drive letter, no backslash or control
+character, no symlinks, no duplicate names. The component validates every zip it receives before writing a byte to disk and
+only ever packs `PSP/SAVEDATA/`.
+
+## Limits worth knowing
+
+Body limits above; one session per core process; per-session cgroup, writable-directory quota and file-size limits
+(`TOTV_STREAM_SESSION_PIDS`, `_SESSION_MEM_MB`, `_RW_MAX_MB`, `_RW_MAX_FILES`, `_MAX_FILE_MB`). The `TOTV_STREAM_*`
+variable names are part of the contract and must not be renamed.

@@ -1,6 +1,7 @@
 # totv-streaming
 
-Game streaming component for the [Totv](https://github.com/victobriel/totv) media server. It runs **one libretro core per
+Game streaming component for the Totv media server (a separate, currently private project; this repository stands on its own and
+documents the contract it speaks in [docs/CONTRACT.md](docs/CONTRACT.md)). It runs **one libretro core per
 session** (SNES, N64 or PSP), encodes the picture as H.264 Baseline (no B-frames) and the sound as Opus, sends both over
 WebRTC, and receives the controller over an unordered DataChannel.
 
@@ -13,8 +14,8 @@ invented here, and legal advice is still pending (see [ROADMAP.md](ROADMAP.md)).
 
 The Totv server talks to this component over a Unix socket (control API, `Authorization: Bearer <secret>`), hands it a
 session token, and the component downloads the ROM and the save from the Totv on `127.0.0.1` and uploads the save back.
-The contract is documented in the Totv repository:
-[docs/games-streaming.md](https://github.com/victobriel/totv/blob/main/docs/games-streaming.md). The environment
+The contract (routes, authentication, input packet, saves, limits) is specified in
+[docs/CONTRACT.md](docs/CONTRACT.md). The environment
 variables `TOTV_STREAM_*` and the socket/secret paths are part of that contract and must not be renamed.
 
 Nothing from this repository goes into the Totv image: it is a separate program (GPL) that the Totv only talks to.
@@ -45,7 +46,10 @@ scripts/fetch-cores.sh                                   # mupen64plus-next (N64
 scripts/fetch-cores.sh --i-accept-snes9x-noncommercial snes9x   # opt-in: the snes9x license is NON-COMMERCIAL
 ```
 
-Read [NOTICE.md](NOTICE.md) for each core's license before you distribute anything you build.
+Read [NOTICE.md](NOTICE.md) for each core's license before you distribute anything you build. Note: the emulator host
+(`emu/`, GPL-3.0-or-later) loads the core with `dlopen` **into the same process**. A GPL-3.0-or-later host and a
+GPL-2.0-only core would be incompatible for *joint distribution* (shipping both together). Running them locally distributes
+nothing. Which GPL-2.0 core versions are "or later" is still to be confirmed; see NOTICE.md and ROADMAP.md.
 
 ## Run
 
