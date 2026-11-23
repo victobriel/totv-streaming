@@ -30,7 +30,6 @@
 #include <linux/audit.h>
 #include <linux/capability.h>
 #include <linux/filter.h>
-#include <linux/landlock.h>
 #include <linux/seccomp.h>
 #include <libgen.h>
 #include <poll.h>
@@ -76,10 +75,37 @@
 #ifndef SYS_clone3
 #define SYS_clone3 435
 #endif
-#ifndef LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET
+/* Landlock: declared locally (not from <linux/landlock.h>) so it builds against old kernel headers (Ubuntu 22.04: 5.15, no net/scope).
+ * The ABI actually used is detected at run time (ll_abi()); the kernel ignores nothing: sizes passed to the syscall match the ABI. */
+#ifndef SYS_landlock_create_ruleset
+#define SYS_landlock_create_ruleset 444
+#define SYS_landlock_add_rule 445
+#define SYS_landlock_restrict_self 446
+#endif
+struct totv_ll_ruleset_attr { unsigned long long handled_access_fs, handled_access_net, scoped; };
+struct totv_ll_path_beneath_attr { unsigned long long allowed_access; int parent_fd; } __attribute__((packed));
+#define LANDLOCK_CREATE_RULESET_VERSION (1U << 0)
+#define LANDLOCK_RULE_PATH_BENEATH 1
+#define LANDLOCK_ACCESS_FS_EXECUTE (1ULL << 0)
+#define LANDLOCK_ACCESS_FS_WRITE_FILE (1ULL << 1)
+#define LANDLOCK_ACCESS_FS_READ_FILE (1ULL << 2)
+#define LANDLOCK_ACCESS_FS_READ_DIR (1ULL << 3)
+#define LANDLOCK_ACCESS_FS_REMOVE_DIR (1ULL << 4)
+#define LANDLOCK_ACCESS_FS_REMOVE_FILE (1ULL << 5)
+#define LANDLOCK_ACCESS_FS_MAKE_CHAR (1ULL << 6)
+#define LANDLOCK_ACCESS_FS_MAKE_DIR (1ULL << 7)
+#define LANDLOCK_ACCESS_FS_MAKE_REG (1ULL << 8)
+#define LANDLOCK_ACCESS_FS_MAKE_SOCK (1ULL << 9)
+#define LANDLOCK_ACCESS_FS_MAKE_FIFO (1ULL << 10)
+#define LANDLOCK_ACCESS_FS_MAKE_BLOCK (1ULL << 11)
+#define LANDLOCK_ACCESS_FS_MAKE_SYM (1ULL << 12)
+#define LANDLOCK_ACCESS_FS_REFER (1ULL << 13)
+#define LANDLOCK_ACCESS_FS_TRUNCATE (1ULL << 14)
+#define LANDLOCK_ACCESS_FS_IOCTL_DEV (1ULL << 15)
+#define LANDLOCK_ACCESS_NET_BIND_TCP (1ULL << 0)
+#define LANDLOCK_ACCESS_NET_CONNECT_TCP (1ULL << 1)
 #define LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET (1ULL << 0)
 #define LANDLOCK_SCOPE_SIGNAL (1ULL << 1)
-#endif
 #ifndef CLONE_NEWTIME
 #define CLONE_NEWTIME 0x00000080
 #endif
@@ -321,20 +347,20 @@ static int sandbox_landlock(const char **ro, int nro) {
     if (abi >= 2) fs |= LANDLOCK_ACCESS_FS_REFER;
     if (abi >= 3) fs |= LANDLOCK_ACCESS_FS_TRUNCATE;
     if (abi >= 5) fs |= LANDLOCK_ACCESS_FS_IOCTL_DEV;
-    struct landlock_ruleset_attr attr = { .handled_access_fs = fs };
+    struct totv_ll_ruleset_attr attr = { .handled_access_fs = fs };
     int flags = FLAG_LANDLOCK;
     if (abi >= 4) { attr.handled_access_net = LANDLOCK_ACCESS_NET_BIND_TCP | LANDLOCK_ACCESS_NET_CONNECT_TCP; flags |= FLAG_LL_NET; }
     /* ABI >= 6: the domain may not signal processes outside it (the parent, other sessions) nor connect to abstract unix sockets outside it.
      * Belt and braces on top of the seccomp self_only list (which also covers signals sent with rt_sigqueueinfo etc.). */
-    size_t sz = offsetof(struct landlock_ruleset_attr, handled_access_net);
-    if (abi >= 4) sz = offsetof(struct landlock_ruleset_attr, scoped);
-    if (abi >= 6 && !no_scope) { attr.scoped = LANDLOCK_SCOPE_SIGNAL | LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET; sz = offsetof(struct landlock_ruleset_attr, scoped) + sizeof(attr.scoped); flags |= FLAG_LL_SCOPE; }
+    size_t sz = offsetof(struct totv_ll_ruleset_attr, handled_access_net);
+    if (abi >= 4) sz = offsetof(struct totv_ll_ruleset_attr, scoped);
+    if (abi >= 6 && !no_scope) { attr.scoped = LANDLOCK_SCOPE_SIGNAL | LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET; sz = offsetof(struct totv_ll_ruleset_attr, scoped) + sizeof(attr.scoped); flags |= FLAG_LL_SCOPE; }
     int rs = (int)syscall(SYS_landlock_create_ruleset, &attr, sz, 0);
     if (rs < 0) return 0;
     for (int i = 0; i < nro; i++) {
         int fd = open(ro[i], O_PATH | O_CLOEXEC | O_DIRECTORY);
         if (fd < 0) continue;
-        struct landlock_path_beneath_attr pb = { .allowed_access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR, .parent_fd = fd };
+        struct totv_ll_path_beneath_attr pb = { .allowed_access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR, .parent_fd = fd };
         syscall(SYS_landlock_add_rule, rs, LANDLOCK_RULE_PATH_BENEATH, &pb, 0);
         close(fd);
     }
@@ -344,7 +370,7 @@ static int sandbox_landlock(const char **ro, int nro) {
         unsigned long long a = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_REMOVE_DIR |
                                LANDLOCK_ACCESS_FS_REMOVE_FILE | LANDLOCK_ACCESS_FS_MAKE_DIR | LANDLOCK_ACCESS_FS_MAKE_REG | (abi >= 3 ? LANDLOCK_ACCESS_FS_TRUNCATE : 0) |
                                (abi >= 2 ? LANDLOCK_ACCESS_FS_REFER : 0);
-        struct landlock_path_beneath_attr pb = { .allowed_access = a, .parent_fd = fd };
+        struct totv_ll_path_beneath_attr pb = { .allowed_access = a, .parent_fd = fd };
         syscall(SYS_landlock_add_rule, rs, LANDLOCK_RULE_PATH_BENEATH, &pb, 0);
         close(fd);
     }
@@ -352,7 +378,7 @@ static int sandbox_landlock(const char **ro, int nro) {
         int fd = open(gpu_dev[i], O_PATH | O_CLOEXEC);
         if (fd < 0) continue;
         unsigned long long a = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_WRITE_FILE | (abi >= 5 ? LANDLOCK_ACCESS_FS_IOCTL_DEV : 0);
-        struct landlock_path_beneath_attr pb = { .allowed_access = a, .parent_fd = fd };
+        struct totv_ll_path_beneath_attr pb = { .allowed_access = a, .parent_fd = fd };
         syscall(SYS_landlock_add_rule, rs, LANDLOCK_RULE_PATH_BENEATH, &pb, 0);
         close(fd);
     }
