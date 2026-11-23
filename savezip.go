@@ -41,6 +41,9 @@ type saveLimits struct {
 	MaxEntry    int64 // unpacked bytes of one entry
 	MaxUnpacked int64 // unpacked bytes of the whole package
 	MaxPacked   int64 // size of the .zip itself (the Totv's saveLimits.sram for the platform)
+	// Only: when set, the exact entry names that make a package (PS2: the two memory cards). Anything else below the prefix is left out when packing and ignored
+	// (never extracted) when unpacking, like a name outside the prefix.
+	Only map[string]bool
 }
 
 var pspSaveLimits = saveLimits{MaxFiles: 4096, MaxEntry: 256 << 20, MaxUnpacked: 256 << 20, MaxPacked: 64 << 20}
@@ -142,8 +145,8 @@ func zipSaveDir(rootDir, prefix string, lim saveLimits, quiet time.Duration) ([]
 		if quiet > 0 && now.Sub(info.ModTime()) < quiet {
 			return errSaveBusy
 		}
-		if !safeZipName(name, prefix) {
-			return nil // a file the format cannot carry (odd name): left out, never renamed
+		if !safeZipName(name, prefix) || (lim.Only != nil && !lim.Only[name]) {
+			return nil // a file the format cannot carry (odd name, or not one of the fixed names): left out, never renamed
 		}
 		if info.Size() > lim.MaxEntry {
 			return badZip("%q is larger than %d bytes", name, lim.MaxEntry)
@@ -299,8 +302,8 @@ func parseSaveZip(z []byte, prefix string, lim saveLimits) ([]zipEntry, error) {
 			return nil, badZip("%q is both a file and a directory", bare)
 		}
 		kinds[bare] = isDir
-		if isDir || !strings.HasPrefix(name, prefix) || len(name) <= len(prefix) {
-			p = next // directory entry or outside the prefix: skipped
+		if isDir || !strings.HasPrefix(name, prefix) || len(name) <= len(prefix) || (lim.Only != nil && !lim.Only[name]) {
+			p = next // directory entry, outside the prefix or not one of the fixed names: skipped
 			continue
 		}
 		if flags&1 != 0 {
