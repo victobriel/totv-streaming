@@ -91,7 +91,7 @@ func (s *server) availableCores() map[string][]string {
 	sort.Strings(files)
 	for _, f := range files {
 		name := strings.TrimSuffix(filepath.Base(f), "_libretro.so")
-		if ci, ok := s.coreAllowed(name); ok && (!ci.gl || s.gpu.OK) && (!ci.sysAssets || s.assetsOK()) {
+		if ci, ok := s.coreAllowed(name); ok && (!ci.gl || s.gpu.OK) && (!ci.sysAssets || s.assetsOK()) && (!ci.needBIOS || ps2BiosScan(s.cfg.PS2BiosDir).OK) {
 			cores[ci.platform] = append(cores[ci.platform], "server_"+name)
 		}
 	}
@@ -103,7 +103,7 @@ func (s *server) health(w http.ResponseWriter, r *http.Request) {
 	if s.gpu.OK {
 		gpu = map[string]any{"api": "egl+opengl", "renderer": s.gpu.Renderer, "version": s.gpu.Version}
 	}
-	writeJSON(w, 200, map[string]any{"version": version, "encoder": "x264", "gpu": gpu, "cores": s.availableCores(), "isolation": s.iso, "limits": s.limitsView()})
+	writeJSON(w, 200, map[string]any{"version": version, "encoder": "x264", "gpu": gpu, "cores": s.availableCores(), "isolation": s.iso, "limits": s.limitsView(), "ps2": s.ps2Health()})
 }
 
 func (s *server) list(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +145,12 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 	if !coreOK || (ci.gl && !s.gpu.OK) {
 		writeErr(w, 400, "unknown_core")
 		return
+	}
+	if ci.needBIOS {
+		if r := ps2BiosScan(s.cfg.PS2BiosDir); !r.OK { // before a byte of the image is downloaded
+			writeErr(w, 502, r.Reason)
+			return
+		}
 	}
 	if ci.sysAssets && !s.assetsOK() {
 		writeErr(w, 502, "system_assets_missing") // the PPSSPP assets are not installed next to the cores (README, "PSP")

@@ -194,15 +194,22 @@ func (s *session) start(ctx context.Context) string {
 }
 
 func (s *session) doStart(ctx context.Context) string {
-	dir, err := os.MkdirTemp(s.srv.cfg.TmpRoot, "ses-")
+	ci, _ := s.srv.coreAllowed(s.core)
+	s.ci = ci
+	var bios ps2BiosInfo
+	if ci.needBIOS { // the console BIOS the operator provides: checked before anything is created or downloaded
+		if bios = ps2BiosScan(s.srv.cfg.PS2BiosDir); !bios.OK {
+			log.Printf("session %s: no usable PS2 BIOS: %s (files looked at: %d, valid: %d)", s.id, bios.Reason, bios.Files, bios.Valid)
+			return bios.Reason
+		}
+	}
+	dir, err := os.MkdirTemp(s.srv.cfg.sessionRoot(ci), "ses-") // PS2: a DISK directory (TOTV_STREAM_BIG_TMP), the image does not fit in RAM
 	if err != nil {
 		return "internal"
 	}
 	s.pmu.Lock()
 	s.dir = dir
 	s.pmu.Unlock()
-	ci, _ := s.srv.coreAllowed(s.core)
-	s.ci = ci
 	rom := filepath.Join(dir, "game.sfc")
 	max := int64(64 << 20)
 	if ci.fullPath {
@@ -212,7 +219,7 @@ func (s *session) doStart(ctx context.Context) string {
 			return "internal"
 		}
 		rom = filepath.Join(romDir, "game.bin")
-		max = ci.maxROM
+		max = s.srv.cfg.romMax(ci)
 	}
 	if _, err := s.tc.download(ctx, "/api/games/rom/"+strconv.FormatInt(s.req.MediaID, 10), rom, max); err != nil {
 		if errors.Is(err, errNotFound) {
@@ -226,7 +233,7 @@ func (s *session) doStart(ctx context.Context) string {
 	}
 	if ci.fullPath {
 		var err error
-		if rom, err = finalizeFullPathROM(rom, s.req.Platform); err != nil {
+		if rom, err = finalizeFullPathROM(rom, ci.platform); err != nil {
 			log.Printf("session %s: rom refused: %v", s.id, err)
 			return "rom_invalid"
 		}
@@ -248,6 +255,12 @@ func (s *session) doStart(ctx context.Context) string {
 		s.pmu.Lock()
 		s.rwDir = rw
 		s.pmu.Unlock()
+		if ci.needBIOS {
+			if err := installPS2BIOS(s.srv.cfg.PS2BiosDir, rw, bios); err != nil {
+				log.Printf("session %s: BIOS copy failed: %v", s.id, err)
+				return "bios_invalid"
+			}
+		}
 		if code := s.loadDirSave(ctx, sp); code != "" {
 			return code
 		}
@@ -266,10 +279,13 @@ func (s *session) doStart(ctx context.Context) string {
 	if ci.sysAssets {
 		sysdir = s.srv.cfg.PSPSystemDir // read-only for the core (ro=), the PPSSPP assets
 	}
+	if ci.saveSys {
+		sysdir = s.rwDir // PCSX2 keeps BIOS, memory cards and shader cache below <system>/pcsx2: the system directory IS the writable one
+	}
 	w, h := s.srv.size(ci)
 
 	args := []string{s.corePath, rom, srampath, sysdir, strconv.Itoa(w), strconv.Itoa(h)}
-	if o := s.srv.hostOptions(s.core, ci, s.rwDir, s.srv.cfg.PSPSystemDir); o != "" {
+	if o := s.srv.hostOptionsBIOS(s.core, ci, s.rwDir, s.srv.cfg.PSPSystemDir, bios.Name); o != "" {
 		args = append(args, o)
 	}
 	cmd := exec.Command(s.srv.cfg.EmuBin, args...)
@@ -283,9 +299,10 @@ func (s *session) doStart(ctx context.Context) string {
 	}
 	// a cgroup of its own for the session (cgroup.go): pids.max, memory.max, no swap
 	cgWrapped := false
+	cgCfg := s.srv.cfg.forCore(ci) // PS2: PCSX2 needs more than the 3 GiB default (an operator value above it is kept)
 	if s.srv.cfg.cgroupMode() != "off" {
 		if s.srv.cg.systemdRun != "" {
-			s.srv.cfg.wrapCgroup(cmd, s.srv.cg.systemdRun, s.id)
+			cgCfg.wrapCgroup(cmd, s.srv.cg.systemdRun, s.id)
 			cgWrapped = true
 		} else if s.srv.cfg.cgroupMode() == "require" {
 			return "isolation_unavailable"
@@ -375,7 +392,7 @@ func (s *session) doStart(ctx context.Context) string {
 		}
 	}
 	if cgWrapped { // the kernel's view of the session's cgroup, not systemd-run's word
-		if err := s.srv.cfg.checkSessionCgroup("/sys/fs/cgroup", core, ownCgroupPath()); err != nil {
+		if err := cgCfg.checkSessionCgroup("/sys/fs/cgroup", core, ownCgroupPath()); err != nil {
 			s.srv.cgBad.Add(1)
 			log.Printf("session %s: WARNING cgroup limits not enforced: %v", s.id, err)
 			// require, and also auto once the probe proved the scope works (limits.session.state == "enforced"): auto only degrades at the start probe
@@ -771,7 +788,7 @@ func (s *session) releaseInput() {
 
 var _ = json.Marshal
 
-// finalizeFullPathROM names the downloaded file by what it is (PPSSPP picks the loader by extension): ISO 9660 image, CSO or PBP.
+// finalizeFullPathROM names the downloaded file by what it is (the core picks the loader by extension): PSP ISO 9660 image, CSO or PBP; PS2 ISO, CHD, CSO, ZSO.
 // A zip is refused (an ISO inside a zip would have to be unpacked to GB of disk; the Totv serves the file itself).
 func finalizeFullPathROM(p, platform string) (string, error) {
 	f, err := os.Open(p)
@@ -781,7 +798,11 @@ func finalizeFullPathROM(p, platform string) (string, error) {
 	head := make([]byte, 4)
 	n, _ := io.ReadFull(f, head)
 	f.Close()
-	ext, err := pspROMExt(head[:n])
+	extOf := pspROMExt
+	if platform == "ps2" {
+		extOf = ps2ROMExt
+	}
+	ext, err := extOf(head[:n])
 	if err != nil {
 		return "", err
 	}
@@ -811,7 +832,8 @@ func pspROMExt(head []byte) (string, error) {
 // loadDirSave downloads the save package (a zip) and restores it below the core's writable directory. 404 = no save yet.
 // Any other failure refuses the session: never start from an empty save when the real one could not be read or understood.
 func (s *session) loadDirSave(ctx context.Context, tmp string) string {
-	switch n, err := s.tc.download(ctx, "/api/games/"+strconv.FormatInt(s.req.ItemID, 10)+"/sram", tmp, pspSaveLimits.MaxPacked); {
+	prefix, lim := saveSpecFor(s.ci)
+	switch n, err := s.tc.download(ctx, "/api/games/"+strconv.FormatInt(s.req.ItemID, 10)+"/sram", tmp, lim.MaxPacked); {
 	case errors.Is(err, errNotFound):
 		return ""
 	case err != nil:
@@ -822,7 +844,7 @@ func (s *session) loadDirSave(ctx context.Context, tmp string) string {
 		if err != nil || int64(len(z)) != n {
 			return "save_load_failed"
 		}
-		if err := unzipSave(z, s.rwDir, pspSavePrefix, pspSaveLimits); err != nil {
+		if err := unzipSave(z, s.rwDir, prefix, lim); err != nil {
 			log.Printf("session %s: save package refused: %v", s.id, err)
 			return "save_load_failed"
 		}
@@ -834,7 +856,8 @@ func (s *session) loadDirSave(ctx context.Context, tmp string) string {
 // refreshDirSave packs the memory stick's savedata into s.sram (the buffer uploadSRAM compares and sends). With quiet > 0 the
 // files must have been untouched for that long (the core may be writing); errSaveBusy then means "try again later".
 func (s *session) refreshDirSave(quiet time.Duration) error {
-	z, err := zipSaveDir(s.rwDir, pspSavePrefix, pspSaveLimits, quiet)
+	prefix, lim := saveSpecFor(s.ci)
+	z, err := zipSaveDir(s.rwDir, prefix, lim, quiet)
 	if err != nil {
 		return err
 	}
