@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -69,18 +71,71 @@ func (c *totvClient) do(ctx context.Context, method, path string, body []byte) (
 
 var errNotFound = errors.New("not found")
 
-// download streams GET path into dest (mode 0600), at most max bytes. 404 -> errNotFound.
+// downloadError carries a short, sanitized reason (no paths, no URLs, no token) for the log and the `detail` of the 502; Unwrap keeps
+// errors.Is(errNotFound / errNoSpace) working.
+type downloadError struct {
+	reason string
+	err    error
+}
+
+func (e *downloadError) Error() string { return e.reason }
+func (e *downloadError) Unwrap() error { return e.err }
+
+// downloadReason is the sanitized reason of a download failure ("" when err is not one of ours).
+func downloadReason(err error) string {
+	var de *downloadError
+	if errors.As(err, &de) {
+		return de.reason
+	}
+	return ""
+}
+
+// ioReason turns an I/O error into text without the file names a *PathError carries: ENOSPC/EDQUOT (a tmpfs with a per-user quota reports
+// free space in statfs and still refuses the write), a timeout, a cut connection, or the errno text.
+func ioReason(err error, what string, n int64) (string, bool) {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		err = pe.Err
+	}
+	switch {
+	case errors.Is(err, syscall.ENOSPC):
+		return what + ": no space left on device after " + strconv.FormatInt(n>>20, 10) + " MiB", true
+	case errors.Is(err, syscall.EDQUOT):
+		return what + ": disk quota exceeded after " + strconv.FormatInt(n>>20, 10) + " MiB", true
+	case errors.Is(err, context.DeadlineExceeded):
+		return what + ": timeout after " + strconv.FormatInt(n>>20, 10) + " MiB", false
+	case errors.Is(err, context.Canceled):
+		return what + ": cancelled after " + strconv.FormatInt(n>>20, 10) + " MiB", false
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return what + ": connection closed early after " + strconv.FormatInt(n>>20, 10) + " MiB", false
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return what + ": timeout after " + strconv.FormatInt(n>>20, 10) + " MiB", false
+	}
+	var en syscall.Errno
+	if errors.As(err, &en) {
+		return what + ": " + en.Error() + " after " + strconv.FormatInt(n>>20, 10) + " MiB", false
+	}
+	return what + " failed after " + strconv.FormatInt(n>>20, 10) + " MiB", false
+}
+
+// download streams GET path into dest (mode 0600), at most max bytes. 404 -> errNotFound. Failures are *downloadError with a sanitized reason.
 func (c *totvClient) download(ctx context.Context, path, dest string, max int64) (int64, error) {
 	res, err := c.do(ctx, "GET", path, nil)
 	if err != nil {
-		return 0, errors.New("unreachable")
+		r := "totv unreachable"
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			r, _ = ioReason(err, "request", 0)
+		}
+		return 0, &downloadError{reason: r, err: errors.New("unreachable")}
 	}
 	defer res.Body.Close()
 	if res.StatusCode == 404 {
-		return 0, errNotFound
+		return 0, &downloadError{reason: "http status 404", err: errNotFound}
 	}
 	if res.StatusCode != 200 {
-		return 0, fmt.Errorf("status %d", res.StatusCode)
+		return 0, &downloadError{reason: fmt.Sprintf("http status %d", res.StatusCode), err: fmt.Errorf("status %d", res.StatusCode)}
 	}
 	// refuse before writing a byte: the declared size must fit the disk with room to spare (unknown size: assume the worst, max)
 	need := res.ContentLength
@@ -88,22 +143,37 @@ func (c *totvClient) download(ctx context.Context, path, dest string, max int64)
 		need = max
 	}
 	if res.ContentLength > max {
-		return 0, errors.New("too large")
+		return 0, &downloadError{reason: "image of " + strconv.FormatInt(res.ContentLength>>20, 10) + " MiB is over the " + strconv.FormatInt(max>>20, 10) + " MiB limit", err: errors.New("too large")}
 	}
 	if err := checkSpace(filepath.Dir(dest), need+spaceSlack); err != nil {
-		return 0, err
+		if errors.Is(err, errNoSpace) {
+			return 0, &downloadError{reason: "not enough free space for " + strconv.FormatInt(need>>20, 10) + " MiB", err: err}
+		}
+		r, _ := ioReason(err, "statfs", 0)
+		return 0, &downloadError{reason: r, err: err}
 	}
 	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return 0, err
+		r, _ := ioReason(err, "create", 0)
+		return 0, &downloadError{reason: r, err: err}
 	}
 	defer f.Close()
 	n, err := io.Copy(f, io.LimitReader(res.Body, max+1))
 	if err != nil {
-		return n, errors.New("read failed")
+		if cerr := ctx.Err(); cerr != nil {
+			err = cerr
+		}
+		r, full := ioReason(err, "download", n)
+		if full {
+			return n, &downloadError{reason: r, err: errNoSpace}
+		}
+		return n, &downloadError{reason: r, err: errors.New("read failed")}
 	}
 	if n > max {
-		return n, errors.New("too large")
+		return n, &downloadError{reason: "image is over the " + strconv.FormatInt(max>>20, 10) + " MiB limit", err: errors.New("too large")}
+	}
+	if res.ContentLength >= 0 && n != res.ContentLength {
+		return n, &downloadError{reason: "short body: " + strconv.FormatInt(n>>20, 10) + " of " + strconv.FormatInt(res.ContentLength>>20, 10) + " MiB", err: errors.New("short")}
 	}
 	return n, nil
 }

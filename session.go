@@ -41,17 +41,18 @@ type frame struct {
 }
 
 type session struct {
-	srv      *server
-	id       string
-	req      createReq
-	core     string
-	corePath string
-	tc       *totvClient
-	ci       coreInfo
-	rwDir    string // PSP: the core's only writable directory (tmpfs): memory stick, shader cache
-	iceIP    string
-	dir      string
-	created  time.Time
+	failDetail atomic.Value // string: sanitized reason of the last start failure (the `detail` of the 502)
+	srv        *server
+	id         string
+	req        createReq
+	core       string
+	corePath   string
+	tc         *totvClient
+	ci         coreInfo
+	rwDir      string // PSP: the core's only writable directory (tmpfs): memory stick, shader cache
+	iceIP      string
+	dir        string
+	created    time.Time
 
 	mu             sync.Mutex
 	state          string
@@ -234,8 +235,18 @@ func (s *session) doStart(ctx context.Context) string {
 		if errors.Is(err, errNotFound) {
 			return "rom_not_found"
 		}
+		reason := downloadReason(err)
+		if reason == "" {
+			reason = "download failed"
+		}
+		s.failDetail.Store(reason)
+		log.Printf("session %s: rom download failed (%s, core %s): %s", s.id, s.req.Platform, s.core, reason)
 		if errors.Is(err, errNoSpace) {
-			log.Printf("session %s: not enough free space in %s for the ROM", s.id, s.srv.cfg.TmpRoot)
+			if ci.bigROM && s.srv.cfg.BigTmp == "" && s.srv.cfg.bigRootIsTmpfs() {
+				// no disk directory for big images and the RAM tmpfs cannot hold this one: clear, early, and the fix is named
+				s.failDetail.Store(reason + "; set TOTV_STREAM_BIG_TMP to a disk directory")
+				return "rom_too_large_tmp"
+			}
 			return "no_space"
 		}
 		return "rom_download_failed"

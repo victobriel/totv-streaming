@@ -213,6 +213,10 @@ func main() {
 		if r := ps2BiosScan(cfg.PS2BiosDir); !r.OK {
 			log.Printf("WARNING: PS2 sessions will be refused (%s): TOTV_STREAM_PS2_BIOS_DIR=%q holds no valid PS2 BIOS (the component never ships one)", r.Reason, cfg.PS2BiosDir)
 		}
+		if d := srv.cfg.applyBigTmpFallback(); d != "" {
+			cfg.BigTmp = d
+			log.Printf("TOTV_STREAM_BIG_TMP is unset and %s is a tmpfs: PS2 images go to the disk directory %s (0700, emptied after each session and at boot)", cfg.TmpRoot, d)
+		}
 		if w := cfg.checkBigTmp(); w != "" {
 			log.Printf("WARNING: %s", w)
 		}

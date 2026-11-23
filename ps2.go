@@ -344,3 +344,42 @@ func (c config) checkBigTmp() string {
 	}
 	return ""
 }
+
+// bigRootIsTmpfs: the directory big images go to is a RAM tmpfs.
+func (c config) bigRootIsTmpfs() bool {
+	ok, _, err := tmpfsInfo(c.bigTmp())
+	return err == nil && ok
+}
+
+// applyBigTmpFallback: TOTV_STREAM_BIG_TMP is unset and TOTV_STREAM_TMP is a tmpfs. A tmpfs reports free space in statfs and can still refuse
+// the write (per-user quota: EDQUOT at ~2.7 GiB on a 16 GiB /tmp), and a PS2 image would sit in RAM. So big images go to a private DISK directory
+// under $XDG_CACHE_HOME (else ~/.cache), mode 0700, emptied at the end of each session and at boot (cleanOrphans). Returns the directory ("" =
+// no fallback was needed or possible: the tmpfs stays, and an image that does not fit fails early with rom_too_large_tmp).
+func (c *config) applyBigTmpFallback() string {
+	if c.BigTmp != "" || !c.bigRootIsTmpfs() {
+		return ""
+	}
+	base := os.Getenv("XDG_CACHE_HOME")
+	if base == "" || !filepath.IsAbs(base) {
+		h, err := os.UserHomeDir()
+		if err != nil || h == "" {
+			return ""
+		}
+		base = filepath.Join(h, ".cache")
+	}
+	d := filepath.Join(base, "totv-streaming", "bigtmp")
+	if err := os.MkdirAll(d, 0o700); err != nil {
+		return ""
+	}
+	if err := os.Chmod(d, 0o700); err != nil {
+		return ""
+	}
+	if st, err := os.Stat(d); err != nil || !st.IsDir() {
+		return ""
+	}
+	if ok, _, err := tmpfsInfo(d); err != nil || ok {
+		return ""
+	}
+	c.BigTmp = d
+	return d
+}

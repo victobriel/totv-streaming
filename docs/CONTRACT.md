@@ -93,7 +93,7 @@ only ever packs `PSP/SAVEDATA/`.
 - **Core:** `server_pcsx2`, platform `ps2`. Offered in `/v1/health` `cores.ps2` only when a valid BIOS is installed. `health.ps2` is `{bios, reason?, bios_dir_set, bios_files, bios_valid, max_iso_mb, big_tmp}`
   (`reason` is `bios_missing` or `bios_invalid` when `bios` is false); it is absent when no PS2 core is installed. `ps2.bios=false` means every PS2 session will be refused.
 - **Errors of `POST /v1/sessions`** (HTTP 502, before anything is downloaded): `bios_missing` (no directory, empty, or no candidate files), `bios_invalid` (files exist but none has a valid
-  PS2 ROMDIR: a PS1 BIOS, a truncated dump). Also `rom_invalid` (zip/gzip image), `rom_download_failed` (over `max_iso_mb`), `no_space`, `save_load_failed`.
+  PS2 ROMDIR: a PS1 BIOS, a truncated dump). Also `rom_invalid` (zip/gzip image), `rom_download_failed` (over `max_iso_mb`, an HTTP error, a cut or timed-out download; the 502 body carries a sanitized `detail`), `rom_too_large_tmp` (no `TOTV_STREAM_BIG_TMP`, no disk fallback and the RAM tmpfs cannot hold the image), `no_space`, `save_load_failed`.
 - **Image:** `GET /api/games/rom/{mediaId}` serves the ISO/CHD/CSO/ZSO as a file (up to 9 GiB by default); the start can take **minutes** (the component copies it to disk; `POST /v1/sessions`
   may block up to 10 minutes: the Totv's client timeout must allow it). The server must send `Content-Length` (the free space is checked before the first byte).
 - **Save:** `GET/PUT /api/games/{itemId}/sram` carry a **zip** with exactly these entries and no others: `pcsx2/memcards/Mcd001.ps2` and `pcsx2/memcards/Mcd002.ps2` (raw memory cards, 8650752 bytes each; the

@@ -200,6 +200,10 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 		if code == "isolation_unavailable" {
 			status = 503
 		}
+		if d, _ := ss.failDetail.Load().(string); d != "" {
+			writeJSON(w, status, map[string]string{"error": code, "detail": d})
+			return
+		}
 		writeErr(w, status, code)
 		return
 	}
