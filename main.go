@@ -191,6 +191,9 @@ func main() {
 	if !(srv.iso.Seccomp && srv.iso.Landlock) && !cfg.AllowNoIsolation {
 		log.Printf("isolation not active: sessions are refused (set TOTV_STREAM_ALLOW_NO_ISOLATION=1 for development only)")
 	}
+	if miss := pspAssetsNoText(cfg.PSPSystemDir); miss != "" {
+		log.Printf("WARNING: %s is missing: PSP on-screen dialogs (savedata, \"There is no data.\") are drawn without text. Re-run scripts/psp-assets.sh", miss)
+	}
 	for _, w := range srv.limits.Warnings {
 		log.Printf("WARNING: %s", w)
 	}

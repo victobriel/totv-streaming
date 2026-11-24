@@ -4,6 +4,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -48,5 +50,22 @@ func TestContentBBox(t *testing.T) {
 	rw, rh := float64(320-19-14), float64(240-11-14)
 	if r := rw / rh / (4.0 / 3); r < 0.99 || r > 1.01 {
 		t.Errorf("default crop aspect off: %.4f", r)
+	}
+}
+
+func TestPSPAssetsNoText(t *testing.T) {
+	d := t.TempDir()
+	if got := pspAssetsNoText(d); got != "" {
+		t.Fatalf("no assets at all is assetsOK's business, got %q", got)
+	}
+	os.MkdirAll(filepath.Join(d, "PPSSPP"), 0o755)
+	os.WriteFile(filepath.Join(d, "PPSSPP", "ppge_atlas.zim"), []byte("x"), 0o644)
+	want := filepath.Join(d, "PPSSPP", "ppge_atlas.meta")
+	if got := pspAssetsNoText(d); got != want {
+		t.Fatalf("zim without meta: got %q, want %q", got, want)
+	}
+	os.WriteFile(want, []byte("x"), 0o644)
+	if got := pspAssetsNoText(d); got != "" {
+		t.Fatalf("complete set: got %q", got)
 	}
 }

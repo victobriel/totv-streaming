@@ -341,6 +341,21 @@ func (s *server) assetsOK() bool {
 	return err == nil && st.Mode().IsRegular()
 }
 
+// pspAssetsNoText reports a PSP system directory that has ppge_atlas.zim but not ppge_atlas.meta. The core still starts, but PPGe (the PSP's
+// own on-screen dialogs: savedata list, "There is no data.", the button hints) then has no glyph table and draws every dialog WITHOUT text:
+// a blank box that looks frozen, closed only by a button the player cannot see (Circle). Returns the missing file's path, "" when complete.
+func pspAssetsNoText(systemDir string) string {
+	zim := filepath.Join(systemDir, "PPSSPP", "ppge_atlas.zim")
+	if st, err := os.Stat(zim); err != nil || !st.Mode().IsRegular() {
+		return "" // no assets at all: assetsOK() already says so
+	}
+	meta := filepath.Join(systemDir, "PPSSPP", "ppge_atlas.meta")
+	if st, err := os.Stat(meta); err != nil || !st.Mode().IsRegular() {
+		return meta
+	}
+	return ""
+}
+
 // limitsView is `limits` of /v1/health: the component's own cgroup (as before, flattened) plus `session`, the per-session cgroup.
 func (s *server) limitsView() any {
 	ss := s.cg.l
