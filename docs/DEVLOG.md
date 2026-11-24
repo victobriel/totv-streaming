@@ -1021,3 +1021,26 @@ for the deployment; (d) the driver cannot be kept patched promptly. A personal P
 - Docker seccomp profile not regenerated for `CLONE_NEWPID`; Mesa (Intel/AMD) left alone by the descriptor closing and untested.
 - The `streamGpuPlatforms` policy is a proposal for the `servidor` area; the Totv was not changed.
 
+
+
+## Multi-peer sessions and `advertiseIps`
+
+What changed (`peers.go`, `rtc.go`, `control.go`, `session.go`): `rtcState` keeps a map of peers per slot; one x264 encoder, one packetizer, one `TrackLocalStaticRTP` (video) and one `TrackLocalStaticSample` (audio)
+are added to every PeerConnection (pion writes the same packets to each binding). All peers share one UDP socket/mux (the ICE ufrag tells them apart). New routes `POST /v1/sessions/{id}/peers`,
+`DELETE /v1/sessions/{id}/peers/{peerId}`, optional `peerId` on `/signal` (absent = slot 0, the old flow), `peers` in the session status, `multiplayer`/`maxPeers` in health, `TOTV_STREAM_MAX_PEERS` (default 2, max 4).
+`advertiseIps` -> `SetNAT1To1IPs(advertiseIps + iceHost, host)`; the bind stays `iceHost:UDPPort`. Details of the contract: [CONTRACT.md](CONTRACT.md).
+
+Decisions: the input `port` byte is overwritten with the slot (before `parseInput`, so a garbage port byte is no longer a bad packet); `seq`/masks/axes are per slot; a peer that leaves (or whose connection drops)
+releases only its own port. A new connection forces an IDR for everybody (one spike of bitrate on the other peers). The session state is derived from the peers (`refreshLocked`): `playing` while >= 1 is
+connected; the "gone for DisconnectGrace" clock of the session starts when the last connected peer goes. Not done: multitap (3-5 players), per-peer bitrate adaptation (one encoder serves all), per-peer playout-delay
+extension ids (the last negotiated id is used for all; browsers agree), a rule for "the owner left" (the host decides and calls DELETE).
+
+### Tests and proof
+
+- `go vet`, `go test -race .`: new tests in `multipeer_test.go` (validation and candidates of `advertiseIps`, route contract, `slot_taken`/`room_full`/`not_multiplayer`, port overwrite and per-peer `seq`,
+  two real pion clients on the test core: both get video, audio and an IDR, the second leaving does not stop the first, a leaving peer releases its buttons). The one-player flow is covered by every existing test
+  (they negotiate without `peerId`). Only `TestPSPFullPathSessionAndSave` fails, with `disk quota exceeded` of the tmpfs (unrelated).
+- Real run (isolated instance, own ports, a real SNES ROM read-only, two headless Chrome pages in ONE session, both writing `port=0` in every packet): both decode the 640x480 stream (0 lost packets, 0 freezes,
+  one decoded frame per encoded frame, 14 keyframes in 10 s for the second client after joining). In a 2-player game the controller of slot 1 moved only the second character (left, up) and the controller of slot 0 only the first (right, down);
+  a second pad's Start joined/unpaused the game. CPU of component + emulator, one core = 100 %: 1 peer 28.3 + 25.9 = 54.2 %, 2 peers 26.7 + 30.8 = 57.5 % (the encoder runs once; +5 points of component CPU for the second SRTP stream). Measured on a PC under memory pressure (swap full).
+- Not proved: more than 2 peers, N64/PSP/PS2 refusals against a real core (unit-tested only), the network path of `advertiseIps` through a second interface (only that the answer carries the candidates), behaviour on the Fire TV, long runs (minutes), packet loss with two peers.

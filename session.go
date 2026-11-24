@@ -111,8 +111,8 @@ type session struct {
 
 	// input
 	imu       sync.Mutex
-	haveSeq   bool
-	lastSeq   uint16
+	haveSeq   [4]bool   // per slot (peer)
+	lastSeq   [4]uint16 // per slot
 	masks     [4]uint16
 	axes      [4][4]int8
 	lastVideo atomic.Int64 // unix nano of the last video frame from the child (stall watchdog)
@@ -176,7 +176,7 @@ func (s *session) Status() map[string]any {
 			"msInputToFrame": s.inputToFrame.pct(), "msEncode": s.encodeMs.pct(), "msFrameToWire": s.wireMs.pct(), "msInputWrite": s.inputWrite.pct(),
 			"sandboxFlags": s.flags, "hostMs": s.hostMsV.Load(),
 		},
-		"quality": s.prof.Quality, "output": fmt.Sprintf("%dx%d", s.prof.W, s.prof.H), "aspect": s.aspectNow(), "kbpsCeiling": s.prof.Kbps, "fps": s.fpsNow(),
+		"peers": s.peersView(), "quality": s.prof.Quality, "output": fmt.Sprintf("%dx%d", s.prof.W, s.prof.H), "aspect": s.aspectNow(), "kbpsCeiling": s.prof.Kbps, "fps": s.fpsNow(),
 		"overBudget": s.overBudget.Load(), "suggestQuality": s.suggestQuality(),
 	}
 }
@@ -763,6 +763,7 @@ func (s *session) monitor() {
 			never := !s.everSignaled && time.Since(s.created) > s.srv.cfg.NoSignalTimeout
 			lost := !s.disconnectedAt.IsZero() && time.Since(s.disconnectedAt) > s.srv.cfg.DisconnectGrace
 			s.mu.Unlock()
+			s.reapPeers()
 			// the child is alive but the core stopped producing video (bad ROM, core hang): end it instead of
 			// leaving a frozen "playing" session. Nothing is saved: the SRAM of a stalled core cannot be trusted.
 			if lv := s.lastVideo.Load(); lv != 0 && time.Since(time.Unix(0, lv)) > s.srv.cfg.noVideo() {
@@ -782,21 +783,29 @@ func (s *session) monitor() {
 	}
 }
 
-func (s *session) onInput(msg []byte) {
+// onInputFrom handles one 12-byte packet of the peer in `slot`. The `port` byte of the packet is OVERWRITTEN with the slot (never trusted from the
+// client): a peer can only drive its own controller. seq (anti-repetition) is kept per slot.
+func (s *session) onInputFrom(slot int, msg []byte) {
 	s.inRecv.Add(1)
 	t0 := time.Now()
-	p, ok := parseInput(msg)
+	if len(msg) != inputLen || slot < 0 || slot > 3 {
+		s.inBad.Add(1)
+		return
+	}
+	b := append([]byte(nil), msg...)
+	b[11] = byte(slot)
+	p, ok := parseInput(b)
 	if !ok {
 		s.inBad.Add(1)
 		return
 	}
 	s.imu.Lock()
-	if s.haveSeq && !newerSeq(p.seq, s.lastSeq) {
+	if s.haveSeq[slot] && !newerSeq(p.seq, s.lastSeq[slot]) {
 		s.imu.Unlock()
 		s.inOld.Add(1)
 		return
 	}
-	s.haveSeq, s.lastSeq = true, p.seq
+	s.haveSeq[slot], s.lastSeq[slot] = true, p.seq
 	m := retroMaskFor(s.req.Platform, p.buttons)
 	changed := m != s.masks[p.port]
 	s.masks[p.port] = m
@@ -822,18 +831,27 @@ func (s *session) onInput(msg []byte) {
 	}
 }
 
-func (s *session) releaseInput() {
+// resetSeq forgets the seq of a slot (a new peer starts its own counter).
+func (s *session) resetSeq(slot int) {
 	s.imu.Lock()
-	for i := range s.masks {
-		if s.masks[i] != 0 {
-			s.masks[i] = 0
-			s.sendChild([4]byte{1, 0, 0, byte(i)})
-		}
-		for a := range s.axes[i] {
-			if s.axes[i][a] != 0 {
-				s.axes[i][a] = 0
-				s.sendChild([4]byte{3, byte(i), byte(a), 0})
-			}
+	s.haveSeq[slot] = false
+	s.imu.Unlock()
+}
+
+// releaseInputSlot lets go of every button and stick of one player (its peer is gone).
+func (s *session) releaseInputSlot(i int) {
+	if i < 0 || i > 3 {
+		return
+	}
+	s.imu.Lock()
+	if s.masks[i] != 0 {
+		s.masks[i] = 0
+		s.sendChild([4]byte{1, 0, 0, byte(i)})
+	}
+	for a := range s.axes[i] {
+		if s.axes[i][a] != 0 {
+			s.axes[i][a] = 0
+			s.sendChild([4]byte{3, byte(i), byte(a), 0})
 		}
 	}
 	s.imu.Unlock()

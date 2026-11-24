@@ -32,6 +32,9 @@ type testPeer struct {
 	connected chan struct{}
 	seq       uint16
 	mu        sync.Mutex
+	peerID    string // multi-peer: the peer this client signals as ("" = the old single-player flow, slot 0)
+	answer    string // the SDP answer received
+	gotIDR    atomic.Bool
 }
 
 func newTestPeer(t *testing.T) *testPeer {
@@ -81,6 +84,9 @@ func newTestPeer(t *testing.T) *testPeer {
 				continue
 			}
 			p.vPackets.Add(1)
+			if n := len(pkt.Payload); n > 0 && (pkt.Payload[0]&0x1f == 24 || pkt.Payload[0]&0x1f == 7) { // STAP-A / SPS: the encoder only sends them before an IDR
+				p.gotIDR.Store(true)
+			}
 			if id := p.extID.Load(); id > 0 {
 				if ext := pkt.Header.GetExtension(uint8(id)); bytes.Equal(ext, []byte{0, 0, 0}) {
 					p.pdOK.Add(1)
@@ -111,10 +117,11 @@ func (p *testPeer) negotiate(t *testing.T, e *testEnv, id string) {
 	}
 	// the extension id the browser/app would use for playout-delay
 	p.extID.Store(findExtID(p.pc.LocalDescription().SDP, playoutURI))
-	code, m, raw := e.call("POST", "/v1/sessions/"+id+"/signal", map[string]string{"type": "offer", "sdp": p.pc.LocalDescription().SDP}, testSecret)
+	code, m, raw := e.call("POST", "/v1/sessions/"+id+"/signal", map[string]string{"type": "offer", "sdp": p.pc.LocalDescription().SDP, "peerId": p.peerID}, testSecret)
 	if code != 200 || m["type"] != "answer" {
 		t.Fatalf("signal: %d %s", code, raw)
 	}
+	p.answer, _ = m["sdp"].(string)
 	if err := p.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: m["sdp"].(string)}); err != nil {
 		t.Fatal(err)
 	}
@@ -130,10 +137,12 @@ func (p *testPeer) negotiate(t *testing.T, e *testEnv, id string) {
 	}
 }
 
-func (p *testPeer) sendInput(buttons uint32) time.Time {
+func (p *testPeer) sendInput(buttons uint32) time.Time { return p.sendInputPort(buttons, 0) }
+
+func (p *testPeer) sendInputPort(buttons uint32, port uint8) time.Time {
 	p.mu.Lock()
 	p.seq++
-	b := encodeInput(inputPacket{seq: p.seq, buttons: buttons})
+	b := encodeInput(inputPacket{seq: p.seq, buttons: buttons, port: port})
 	p.mu.Unlock()
 	t := time.Now()
 	_ = p.dc.Send(b)

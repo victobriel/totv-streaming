@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -76,6 +77,8 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("PATCH /v1/sessions/{id}", s.patch)
 	mux.HandleFunc("POST /v1/sessions/{id}/signal", s.signal)
 	mux.HandleFunc("DELETE /v1/sessions/{id}", s.remove)
+	mux.HandleFunc("POST /v1/sessions/{id}/peers", s.addPeer)
+	mux.HandleFunc("DELETE /v1/sessions/{id}/peers/{peerId}", s.removePeer)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.authOK(r) {
 			writeErr(w, http.StatusUnauthorized, "unauthorized")
@@ -104,7 +107,8 @@ func (s *server) health(w http.ResponseWriter, r *http.Request) {
 	if s.gpu.OK {
 		gpu = map[string]any{"api": "egl+opengl", "renderer": s.gpu.Renderer, "version": s.gpu.Version}
 	}
-	writeJSON(w, 200, map[string]any{"version": version, "encoder": "x264", "gpu": gpu, "cores": s.availableCores(), "isolation": s.iso, "limits": s.limitsView(), "ps2": s.ps2Health()})
+	writeJSON(w, 200, map[string]any{"version": version, "encoder": "x264", "gpu": gpu, "cores": s.availableCores(), "isolation": s.iso, "limits": s.limitsView(), "ps2": s.ps2Health(),
+		"multiplayer": s.multiplayerView(), "maxPeers": s.cfg.maxPeers()})
 }
 
 func (s *server) list(w http.ResponseWriter, r *http.Request) {
@@ -118,16 +122,17 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 }
 
 type createReq struct {
-	SessionID string `json:"sessionId"`
-	ItemID    int64  `json:"itemId"`
-	MediaID   int64  `json:"mediaId"`
-	Platform  string `json:"platform"`
-	Core      string `json:"core"`
-	Token     string `json:"token"`
-	ServerURL string `json:"serverUrl"`
-	IceHost   string `json:"iceHost"`
-	Aspect    string `json:"aspect,omitempty"`  // "auto" (default) | "4:3" | "16:9" | "fill" | "pixel": how the picture is placed in the fixed 16:9 output (PATCH changes it live)
-	Quality   string `json:"quality,omitempty"` // "high" | "safe" ("" = the server default, TOTV_STREAM_QUALITY): "safe" is the way to lower a session that reports overBudget
+	SessionID    string   `json:"sessionId"`
+	ItemID       int64    `json:"itemId"`
+	MediaID      int64    `json:"mediaId"`
+	Platform     string   `json:"platform"`
+	Core         string   `json:"core"`
+	Token        string   `json:"token"`
+	ServerURL    string   `json:"serverUrl"`
+	IceHost      string   `json:"iceHost"`
+	AdvertiseIps []string `json:"advertiseIps,omitempty"` // 0..2 literal IPv4s added (with iceHost) as host candidates; the socket stays bound to iceHost
+	Aspect       string   `json:"aspect,omitempty"`       // "auto" (default) | "4:3" | "16:9" | "fill" | "pixel": how the picture is placed in the fixed 16:9 output (PATCH changes it live)
+	Quality      string   `json:"quality,omitempty"`      // "high" | "safe" ("" = the server default, TOTV_STREAM_QUALITY): "safe" is the way to lower a session that reports overBudget
 }
 
 var idRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -170,7 +175,9 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 	}
 	tc, err := newTotvClient(q.ServerURL, q.Token)
 	ip := parseIPv4(q.IceHost)
-	if err != nil || ip == "" {
+	adv, advOK := normalizeAdvertise(q.AdvertiseIps)
+	q.AdvertiseIps = adv
+	if err != nil || ip == "" || !advOK {
 		writeErr(w, 400, "bad_request")
 		return
 	}
@@ -277,6 +284,7 @@ func (s *server) signal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var m struct {
+		PeerID    string          `json:"peerId"`
 		Type      string          `json:"type"`
 		SDP       string          `json:"sdp"`
 		Candidate json.RawMessage `json:"candidate"`
@@ -288,15 +296,15 @@ func (s *server) signal(w http.ResponseWriter, r *http.Request) {
 	ss.touch()
 	switch {
 	case m.Type == "offer" && m.SDP != "":
-		ans, code := ss.handleOffer(r.Context(), m.SDP)
+		ans, code := ss.handleOffer(r.Context(), m.PeerID, m.SDP)
 		if code != "" {
-			writeErr(w, 400, code)
+			writeErr(w, signalStatus(code), code)
 			return
 		}
 		writeJSON(w, 200, map[string]string{"type": "answer", "sdp": ans})
 	case len(m.Candidate) > 0 && string(m.Candidate) != "null":
-		if code := ss.handleCandidate(m.Candidate); code != "" {
-			writeErr(w, 400, code)
+		if code := ss.handleCandidate(m.PeerID, m.Candidate); code != "" {
+			writeErr(w, signalStatus(code), code)
 			return
 		}
 		writeJSON(w, 200, map[string]bool{"ok": true})
@@ -364,4 +372,88 @@ func (s *server) limitsView() any {
 		cgroupLimits
 		Session sessionLimits `json:"session"`
 	}{s.limits, ss}
+}
+
+func signalStatus(code string) int {
+	if code == "peer_not_found" {
+		return 404
+	}
+	return 400
+}
+
+// normalizeAdvertise validates `advertiseIps`: at most 2 literal IPv4 addresses that can be a host candidate (no loopback, unspecified, multicast,
+// link-local or broadcast), duplicates dropped. false = 400 bad_request.
+func normalizeAdvertise(in []string) ([]string, bool) {
+	if len(in) > 2 {
+		return nil, false
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, raw := range in {
+		ip := net.ParseIP(raw)
+		if strings.Contains(raw, ":") || ip == nil || ip.To4() == nil || ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.Equal(net.IPv4bcast) {
+			return nil, false
+		}
+		v := ip.To4().String()
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out, true
+}
+
+// multiplayerView is `multiplayer` of /v1/health: platforms with more than one player and how many (capped by TOTV_STREAM_MAX_PEERS).
+func (s *server) multiplayerView() map[string]int {
+	out := map[string]int{}
+	if n := playersFor("snes"); n > 1 {
+		if m := s.cfg.maxPeers(); m < n {
+			n = m
+		}
+		if n > 1 {
+			out["snes"] = n
+		}
+	}
+	return out
+}
+
+// addPeer: POST /v1/sessions/{id}/peers {slot} -> 201 {peerId}.
+func (s *server) addPeer(w http.ResponseWriter, r *http.Request) {
+	ss := s.get(r.PathValue("id"))
+	if ss == nil {
+		writeErr(w, 404, "not_found")
+		return
+	}
+	var m struct {
+		Slot *int `json:"slot"`
+	}
+	if json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&m) != nil || m.Slot == nil {
+		writeErr(w, 400, "bad_request")
+		return
+	}
+	ss.touch()
+	id, code := ss.addPeer(*m.Slot)
+	switch code {
+	case "":
+		writeJSON(w, 201, map[string]any{"peerId": id, "slot": *m.Slot})
+	case "bad_request":
+		writeErr(w, 400, code)
+	default: // not_multiplayer, room_full, slot_taken
+		writeErr(w, 409, code)
+	}
+}
+
+// removePeer: DELETE /v1/sessions/{id}/peers/{peerId} -> 200. Only that peer goes, whatever its slot (the session is ended by DELETE of the session).
+func (s *server) removePeer(w http.ResponseWriter, r *http.Request) {
+	ss := s.get(r.PathValue("id"))
+	if ss == nil {
+		writeErr(w, 404, "not_found")
+		return
+	}
+	ss.touch()
+	if !ss.removePeer(r.PathValue("peerId")) {
+		writeErr(w, 404, "peer_not_found")
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
 }

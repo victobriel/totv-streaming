@@ -20,9 +20,11 @@ disagree, the code wins. The full list of environment variables and the operatio
 | `GET /v1/health` | `{version, encoder:"x264", gpu: null or {api,renderer,version}, cores:{snes:[..],n64:[..],psp:[..]}, isolation:{...}, limits:{...}}`. Core names are `server_<name>`; GPU cores are listed only when an EGL/GL context could be created at start. |
 | `GET /v1/sessions` | `[{id, state}, ...]` |
 | `POST /v1/sessions` | Creates a session (body below). `201 {"id"}`. |
-| `GET /v1/sessions/{id}` | `{state, playedMs, stats:{...}, quality, aspect, output, kbpsCeiling, fps, overBudget, suggestQuality}` (counters and latency percentiles; `quality` `high`/`safe`, `aspect` the current picture placement (below), `output` `WxH` of the stream, `kbpsCeiling` the VBV cap, `fps` the core's frame rate; `overBudget` true when the host's per-frame time p95 stayed above `TOTV_STREAM_HOSTMS_P95_X10`/10 ms (default 12) for 3 windows of 120 frames, and then `suggestQuality` is `"safe"`: the Totv can offer to restart the game lower). `404 not_found` if unknown. |
+| `GET /v1/sessions/{id}` | `{state, playedMs, peers:[{peerId, slot, state}], stats:{...}, quality, aspect, output, kbpsCeiling, fps, overBudget, suggestQuality}` (counters and latency percentiles; `quality` `high`/`safe`, `aspect` the current picture placement (below), `output` `WxH` of the stream, `kbpsCeiling` the VBV cap, `fps` the core's frame rate; `overBudget` true when the host's per-frame time p95 stayed above `TOTV_STREAM_HOSTMS_P95_X10`/10 ms (default 12) for 3 windows of 120 frames, and then `suggestQuality` is `"safe"`: the Totv can offer to restart the game lower). `404 not_found` if unknown. |
 | `PATCH /v1/sessions/{id}` | Changes a live session. Body `{"aspect":"auto\|4:3\|16:9\|fill\|pixel"}` (and nothing else) -> `200 {"ok":true,"aspect":"<mode>"}`; `400 bad_request` for an unknown mode, a missing or extra field, an empty or non-JSON body; `404 not_found`; `401` like every route. See "Picture placement". |
 | `POST /v1/sessions/{id}/signal` | WebRTC signalling (below). |
+| `POST /v1/sessions/{id}/peers` | Reserves a player slot (multi-peer, below). `201 {"peerId","slot"}`. |
+| `DELETE /v1/sessions/{id}/peers/{peerId}` | Drops that one peer (below). `200 {"ok":true}`, `404 peer_not_found`. |
 | `DELETE /v1/sessions/{id}` | Stops the session, stores the save, answers `200 {"ok":true,"saved":<bool>}`; `502 save_failed` if the save could not be stored. |
 
 Create body (limit 16 KiB):
@@ -31,6 +33,7 @@ Create body (limit 16 KiB):
 { "sessionId": "[A-Za-z0-9_-]{1,64}", "itemId": <int > 0>, "mediaId": <int > 0>,
   "platform": "snes|n64|psp", "core": "server_<name>", "token": "<session token>",
   "serverUrl": "http://127.0.0.1:<port>[/prefix]", "iceHost": "<IPv4 the client can reach>",
+  "advertiseIps": ["<IPv4>", ...] /* optional, 0..2 literal IPv4s, see "Extra ICE addresses" */,
   "aspect": "auto|4:3|16:9|fill|pixel" /* optional, default "auto": the initial picture placement, see below */,
   "quality": "high|safe" /* optional; default TOTV_STREAM_QUALITY (high). "safe" = 640x480 (PSP 848x480), native render scale, 4 Mbps ceiling */ }
 ```
@@ -43,6 +46,32 @@ Session `state` values: `starting`, `waiting_signal`, `connecting`, `playing`, `
 There is no event stream: the host polls `GET /v1/sessions/{id}`. A session nobody signals is ended after
 `TOTV_STREAM_NOSIGNAL_SEC`; one whose peer is gone is ended after `TOTV_STREAM_DISCONNECT_SEC`; one whose core stops
 producing video is ended without saving (`TOTV_STREAM_NOVIDEO_SEC`).
+
+## Extra ICE addresses (`advertiseIps`)
+
+Optional list of 0 to 2 literal IPv4 addresses (for a host with several networks, e.g. LAN and VPN). The answer then carries one host candidate for `iceHost` **and** one for each
+address in the list (all on `TOTV_STREAM_UDP_PORT`); the UDP socket stays bound to `iceHost:UDPPort` only, so the extra addresses must reach that socket (routing/NAT is the operator's).
+Absent or empty = only `iceHost`, as before. `400 bad_request` when it is not a list of at most 2 strings, or an entry is not a literal IPv4, or is loopback, unspecified (`0.0.0.0`),
+multicast, link-local (`169.254/16`) or broadcast. Duplicates (and `iceHost` itself) are collapsed.
+
+## Multi-peer (players per session)
+
+A session can have several WebRTC peers, one per player **slot** (0 = the owner, 1...). Up to `TOTV_STREAM_MAX_PEERS` peers (default **2**, at most 4); a platform also caps it:
+`GET /v1/health` reports `multiplayer: {"snes": 2}` (platforms with more than one player and how many, already capped by `MaxPeers`) and `maxPeers`. SNES = 2 players in this release;
+N64, PSP and PS2 = 1 (no multitap: 3-5 players are not implemented).
+
+- **One encoder, one packetizer, one video track and one audio track** are shared; the same RTP is sent to every peer's PeerConnection (CPU grows by the extra SRTP/NACK work only, see DEVLOG).
+  `streaming` = at least one peer connected. A **keyframe** is forced when a peer connects and on a PLI/FIR from any peer. The playout-delay extension id is the last one negotiated (browsers use the same id).
+- `POST /v1/sessions/{id}/peers` body `{"slot": N}` -> `201 {"peerId":"p...","slot":N}`. Errors: `404 not_found` (session), `400 bad_request` (missing/non-integer slot, `slot` not in 0..3 or beyond
+  the slots of the session), `409 not_multiplayer` (slot > 0 on a one-player platform), `409 room_full` (all slots taken), `409 slot_taken`. A peer starts as `waiting_signal`.
+- **Signalling per peer:** `POST /v1/sessions/{id}/signal` accepts an optional `"peerId"` next to `type`/`sdp`/`candidate`. **Absent = the peer of slot 0**, created on the spot if the host never called `POST .../peers`:
+  the single-player flow (offer, candidates, no peers route) works unchanged. An unknown `peerId` is `404 peer_not_found`; a second offer for the same peer is `400 already_negotiated`.
+- `DELETE /v1/sessions/{id}/peers/{peerId}` closes only that peer: its buttons are released, its slot is free again. **Deleting slot 0 does not end the session**; the host calls `DELETE /v1/sessions/{id}` for that.
+- Peer `state`: `waiting_signal` (reserved, no offer yet), `connecting`, `playing`, `disconnected`. Session `state` is `playing` while at least one peer plays. Timers are per peer: a slot without an offer
+  after `TOTV_STREAM_NOSIGNAL_SEC`, or a peer disconnected for `TOTV_STREAM_DISCONNECT_SEC`, is freed. The session itself ends (as before) when **no** peer has been connected for `TOTV_STREAM_DISCONNECT_SEC`
+  (or, as before, nobody ever signalled for `TOTV_STREAM_NOSIGNAL_SEC`).
+- **Input:** each peer's DataChannel feeds its own controller: the component **overwrites byte 11 (`port`) with the peer's slot** (slot 0 -> port 0, slot 1 -> port 1); whatever the client writes there is ignored
+  (this also applies to the one-player flow: `port` is always 0 there). `seq` anti-repetition is kept per peer.
 
 ## Picture placement (`aspect`)
 
@@ -84,10 +113,10 @@ exactly **12 bytes**, big-endian:
 | 1-2 | seq | uint16; a packet not strictly newer than the last accepted (16-bit wrap-around, `int16(seq-last) > 0`) is dropped |
 | 3-6 | buttons | uint32 bitmask: bit 0 dpad_up, 1 dpad_down, 2 dpad_left, 3 dpad_right, 4 a, 5 b, 6 x, 7 y, 8 l1, 9 r1, 10 l2, 11 r2, 12 l3, 13 r3, 14 start, 15 select, 16 guide (ignored); 17-31 must be 0 |
 | 7-10 | axes | 4 x int8: left X, left Y, right X, right Y (used by N64, PSP and PS2; PS2 uses both sticks) |
-| 11 | port | 0..3 |
+| 11 | port | ignored: the component writes the slot of the peer that sent the packet (see Multi-peer) |
 
 `a/b/x/y` are physical positions of an Xbox-style pad (a south, b east, x west, y north). Packets of another length or
-version, or with `port > 3`, are dropped and counted (`inputBad`, `inputOldDropped` in the status). Clients are expected to
+version are dropped and counted (`inputBad`, `inputOldDropped` in the status). Clients are expected to
 resend the current state every ~16 ms.
 
 ## ROM and saves (what the component asks of the host)

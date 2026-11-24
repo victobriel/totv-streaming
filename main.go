@@ -36,6 +36,7 @@ type config struct {
 	PSPSystemDir, RWTmp, PSPCoreOpts                string // PSP: read-only dir that holds PPSSPP/ (assets), writable tmpfs root for the memory stick, extra core options
 	N64Overscan, N64Aspect                          string // "l,r,t,b" crop in N64 320x240 pixels ("" = default, "off"); "" or "16:9" widescreen
 	MaxSessions, W, H, Kbps                         int
+	MaxPeers                                        int // TOTV_STREAM_MAX_PEERS: peers (players) per session, 1..4 (0 = 2)
 	// Quality (TOTV_STREAM_QUALITY): "high" (the sharper defaults of profile() in cores.go) or "safe"/"" (the older 640x480, native-resolution, 4 Mbps
 	// profile). A session can ask for either in its create request.
 	Quality                                          string
@@ -101,6 +102,7 @@ func loadConfig() config {
 		PS2MaxISOMB:      envInt("TOTV_STREAM_PS2_MAX_ISO_MB", 0),
 		N64Aspect:        os.Getenv("TOTV_STREAM_N64_ASPECT"),
 		MaxSessions:      envInt("TOTV_STREAM_MAX_SESSIONS", 1),
+		MaxPeers:         envInt("TOTV_STREAM_MAX_PEERS", 2),
 		W:                envInt("TOTV_STREAM_WIDTH", 640),
 		H:                envInt("TOTV_STREAM_HEIGHT", 480),
 		SizeSet:          os.Getenv("TOTV_STREAM_WIDTH") != "" && os.Getenv("TOTV_STREAM_HEIGHT") != "",
