@@ -9,9 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log"
-	"net"
 	"sort"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,8 +38,7 @@ type rtcState struct {
 	peers     map[string]*peer
 	inited    bool
 	api       *webrtc.API
-	mux       ice.UDPMux
-	conn      net.PacketConn
+	shared    *sharedMux // the process-wide mux (udpmux.go), released in closeRTC
 	vtrack    *playoutTrack
 	atrack    *webrtc.TrackLocalStaticSample
 	extID     atomic.Int32
@@ -287,15 +284,14 @@ func (s *session) initRTCLocked() string {
 	if r.inited {
 		return ""
 	}
-	conn, err := net.ListenPacket("udp4", net.JoinHostPort(s.iceIP, strconv.Itoa(s.srv.cfg.UDPPort)))
+	sm, err := s.srv.muxes.acquire(s.iceIP, s.srv.cfg.UDPPort)
 	if err != nil {
 		log.Printf("session %s: udp listen failed", s.id)
 		return "udp_unavailable"
 	}
-	mux := ice.NewUDPMuxDefault(ice.UDPMuxParams{UDPConn: conn})
-	r.conn, r.mux = conn, mux
+	r.shared = sm
 	fmtp := h264FmtpFor(h264Level(s.prof.W, s.prof.H, s.encoderFPS()))
-	api, err := newAPI(mux, s.candidateIPs(), fmtp)
+	api, err := newAPI(sm.mux, s.candidateIPs(), fmtp)
 	if err != nil {
 		return "internal"
 	}
@@ -453,15 +449,11 @@ func (s *session) closeRTC() {
 			pcs = append(pcs, p.pc)
 		}
 	}
-	mux, conn := r.mux, r.conn
+	sm := r.shared
+	r.shared = nil
 	r.mu.Unlock()
 	for _, pc := range pcs {
 		_ = pc.Close()
 	}
-	if mux != nil {
-		_ = mux.Close()
-	}
-	if conn != nil {
-		_ = conn.Close()
-	}
+	s.srv.muxes.release(sm) // the socket stays open for the other sessions
 }

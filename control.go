@@ -32,6 +32,7 @@ type server struct {
 	cgBad    atomic.Int64 // sessions that could not be proved to be inside the limits
 	mu       sync.Mutex
 	sessions map[string]*session
+	muxes    muxPool // the one UDP socket/ICE mux all sessions share (udpmux.go)
 }
 
 func newServer(cfg config, iso isolation) *server {
@@ -108,7 +109,7 @@ func (s *server) health(w http.ResponseWriter, r *http.Request) {
 		gpu = map[string]any{"api": "egl+opengl", "renderer": s.gpu.Renderer, "version": s.gpu.Version}
 	}
 	writeJSON(w, 200, map[string]any{"version": version, "encoder": "x264", "gpu": gpu, "cores": s.availableCores(), "isolation": s.iso, "limits": s.limitsView(), "ps2": s.ps2Health(),
-		"multiplayer": s.multiplayerView(), "maxPeers": s.cfg.maxPeers()})
+		"multiplayer": s.multiplayerView(), "maxPeers": s.cfg.maxPeers(), "maxSessions": s.cfg.maxSessions()})
 }
 
 func (s *server) list(w http.ResponseWriter, r *http.Request) {
@@ -182,9 +183,9 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	if len(s.sessions) >= s.cfg.MaxSessions {
+	if len(s.sessions) >= s.cfg.maxSessions() {
 		s.mu.Unlock()
-		writeErr(w, 409, "busy")
+		writeJSON(w, 409, map[string]any{"error": "busy", "reason": "max_sessions", "max": s.cfg.maxSessions()})
 		return
 	}
 	if _, dup := s.sessions[q.SessionID]; dup {

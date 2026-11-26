@@ -1044,3 +1044,23 @@ extension ids (the last negotiated id is used for all; browsers agree), a rule f
   one decoded frame per encoded frame, 14 keyframes in 10 s for the second client after joining). In a 2-player game the controller of slot 1 moved only the second character (left, up) and the controller of slot 0 only the first (right, down);
   a second pad's Start joined/unpaused the game. CPU of component + emulator, one core = 100 %: 1 peer 28.3 + 25.9 = 54.2 %, 2 peers 26.7 + 30.8 = 57.5 % (the encoder runs once; +5 points of component CPU for the second SRTP stream). Measured on a PC under memory pressure (swap full).
 - Not proved: more than 2 peers, N64/PSP/PS2 refusals against a real core (unit-tested only), the network path of `advertiseIps` through a second interface (only that the answer carries the candidates), behaviour on the Fire TV, long runs (minutes), packet loss with two peers.
+
+## Several sessions at once (`TOTV_STREAM_MAX_SESSIONS`, one shared UDP mux)
+
+**Why only one ran before.** `MaxSessions` defaulted to 1 (`main.go`) and, more important, every session opened its own `net.ListenPacket("udp4", iceHost:UDPPort)` in `initRTCLocked`
+(`peers.go`): a second session could not bind the same fixed port (`udp_unavailable`), so raising the limit alone would have failed on the first offer of the second session.
+
+**What changed.** `udpmux.go`: a process-wide `muxPool` keyed by `iceHost:port`. The first session that needs the socket opens it and wraps it in ONE `ice.NewUDPMuxDefault`; the others
+take a reference; the last `closeRTC` closes mux and socket. Each session still has its own `webrtc.API` (own `SetNAT1To1IPs`, own tracks and encoder), all pointing at the shared mux
+(`SetICEUDPMux`); pion demultiplexes by the STUN username fragment and then by remote address, so a PeerConnection never sees datagrams of another one (peers of a room included).
+`MaxSessions` default 1 -> 2, `config.maxSessions()` clamps to 1..4, `GET /v1/health` reports `maxSessions`, and the `409 busy` body adds `reason: max_sessions` and `max` (additive).
+
+**Checked, nothing to change.** Session ids are unique keys (`exists` on a duplicate); `ses-*`/`rw-*` directories come from `os.MkdirTemp` (no collision) and `cleanOrphans` only runs at start;
+each session gets its own `systemd-run --user --scope` (unit name chosen by systemd, `TasksMax`/`MemoryMax` per session, so N sessions each have their own limit; the component's own
+unit limit is what bounds their SUM: size `MemoryMax=`/`TasksMax=` of the unit for N sessions); the control socket is one; the GPU needs no per-session device (each emulator makes its
+own EGL context on the same node); x264 uses 4 threads per session (`TOTV_STREAM_X264_THREADS`), so N sessions can use N x 4 threads at the encoder peak; `TOTV_STREAM_CHILD_LOG` is a
+single debug file shared by the sessions (debugging only). VRAM has no per-session limit (see the GPU isolation notes): the ceiling of 4 is the safety margin.
+
+Tests (`multisession_test.go`, `-race`): clamp of the limit, reference counting of the socket, and two real pion clients on two sessions through the same socket: both get video and audio,
+input of one never reaches the other, the third session is `409 busy/max_sessions`, ending one leaves the other playing and keeps the socket, a freed slot is reusable, the socket closes
+with the last session. Measurements on the real machine (SNES + N64, headless Chrome) are in the Totv repository's report; PS2/PSP at the same time were not proved.

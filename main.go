@@ -77,6 +77,18 @@ func envInt(k string, d int) int {
 	return d
 }
 
+// maxSessions is the number of simultaneous sessions: TOTV_STREAM_MAX_SESSIONS, 1 at least and 4 at most (each session is an emulator process, an
+// x264 encoder with its threads, a GL context on the shared GPU and its own cgroup; see docs/DEVLOG.md for the measured ceiling).
+func (c config) maxSessions() int {
+	switch {
+	case c.MaxSessions < 1:
+		return 1
+	case c.MaxSessions > 4:
+		return 4
+	}
+	return c.MaxSessions
+}
+
 func loadConfig() config {
 	exe, _ := os.Executable()
 	return config{
@@ -101,7 +113,7 @@ func loadConfig() config {
 		PS2CoreOpts:      os.Getenv("TOTV_STREAM_PS2_CORE_OPTS"),
 		PS2MaxISOMB:      envInt("TOTV_STREAM_PS2_MAX_ISO_MB", 0),
 		N64Aspect:        os.Getenv("TOTV_STREAM_N64_ASPECT"),
-		MaxSessions:      envInt("TOTV_STREAM_MAX_SESSIONS", 1),
+		MaxSessions:      envInt("TOTV_STREAM_MAX_SESSIONS", 2),
 		MaxPeers:         envInt("TOTV_STREAM_MAX_PEERS", 2),
 		W:                envInt("TOTV_STREAM_WIDTH", 640),
 		H:                envInt("TOTV_STREAM_HEIGHT", 480),

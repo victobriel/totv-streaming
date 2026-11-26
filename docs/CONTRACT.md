@@ -38,7 +38,11 @@ Create body (limit 16 KiB):
   "quality": "high|safe" /* optional; default TOTV_STREAM_QUALITY (high). "safe" = 640x480 (PSP 848x480), native render scale, 4 Mbps ceiling */ }
 ```
 
-Errors: `400 bad_request` / `unknown_core`, `409 busy` (session limit, `TOTV_STREAM_MAX_SESSIONS`) / `exists`, `502`
+Simultaneous sessions: up to `TOTV_STREAM_MAX_SESSIONS` (default **2**, clamped to 1..4; `maxSessions` in `GET /v1/health`). Every session is its own emulator process, x264 encoder
+and per-session cgroup, with its own temporary directories (`ses-*`, `rw-*`) and save; all of them share the GPU and ONE UDP socket/ICE mux on `TOTV_STREAM_UDP_PORT` (the ICE ufrag
+tells the sessions, and the peers inside a session, apart). Input of a session reaches only that session. Ending one never touches the others.
+
+Errors: `400 bad_request` / `unknown_core`, `409 busy` (session limit, `TOTV_STREAM_MAX_SESSIONS`; the body also carries `"reason":"max_sessions"` and `"max":N`, additive: an old client only reads `error`) / `exists`, `502`
 (`system_assets_missing`, download or start failures), `503 isolation_unavailable` (no seccomp/Landlock and no development
 override). `platform` must match the core.
 
@@ -95,7 +99,7 @@ The bitrate ceiling follows the pixels (12 Mbps at 1280x720, 9 Mbps at 960x720, 
 `POST /v1/sessions/{id}/signal`, body limit 64 KiB (`413 too_large`):
 
 - `{"type":"offer","sdp":"..."}` gives `200 {"type":"answer","sdp":"..."}`. The answer already holds the only ICE candidate
-  (host candidate on `iceHost`, UDP port `TOTV_STREAM_UDP_PORT`, default 8422; no STUN, no TURN, no mDNS).
+  (host candidate on `iceHost`, UDP port `TOTV_STREAM_UDP_PORT`, default 8422, the same port for every session; no STUN, no TURN, no mDNS).
 - `{"candidate":{...}}` gives `200 {"ok":true}`; `{"candidate":null}` is accepted and ignored.
 - Anything else: `400 bad_request`.
 
